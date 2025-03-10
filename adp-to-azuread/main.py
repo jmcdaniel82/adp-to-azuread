@@ -1,166 +1,144 @@
 import os
 import json
-import requests
 import logging
+import requests
 import azure.functions as func
-from msal import ConfidentialClientApplication
-from azure.identity import DefaultAzureCredential
 from ldap3 import Server, Connection, ALL, SUBTREE
 
-# Load Credentials from Azure Key Vault / Environment Variables
-ADP_CLIENT_ID = os.getenv("ADP_CLIENT_ID")
-ADP_CLIENT_SECRET = os.getenv("ADP_CLIENT_SECRET")
-GRAPH_TENANT_ID = os.getenv("GRAPH_TENANT_ID")
-GRAPH_CLIENT_ID = os.getenv("GRAPH_CLIENT_ID")
-GRAPH_CLIENT_SECRET = os.getenv("GRAPH_CLIENT_SECRET")
-LDAP_SERVER = os.getenv("LDAP_SERVER")  # e.g., "ldap://OKCTP-DC01.corp.cfsbrands.com"
-LDAP_USER = os.getenv("LDAP_USER")  # e.g., "LDAPS@corp.cfsbrands.com"
-LDAP_PASSWORD = os.getenv("LDAP_PASSWORD")  # Securely stored in Key Vault
-LDAP_SEARCH_BASE = os.getenv("LDAP_SEARCH_BASE")  # e.g., "dc=corp,dc=cfsbrands,dc=com"
+app = func.FunctionApp()
 
-# API URLs
-ADP_TOKEN_URL = "https://api.adp.com/auth/oauth/v2/token"
-ADP_EMPLOYEE_URL = "https://api.adp.com/hr/v2/workers"
-GRAPH_BULK_UPLOAD_URL = "https://graph.microsoft.com/v1.0/servicePrincipals/{servicePrincipalId}/synchronization/jobs/{jobId}/bulkUpload"
-
-# Authenticate with ADP API
+# Helper Functions
 def get_adp_token():
-    """Retrieve OAuth token from ADP API"""
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": f"Basic {os.getenv('ADP_AUTH_BASE64')}"
-    }
-    data = {"grant_type": "client_credentials"}
+    token_url = os.getenv("ADP_TOKEN_URL")
+    client_id = os.getenv("ADP_CLIENT_ID")
+    client_secret = os.getenv("ADP_CLIENT_SECRET")
+    cert_pem = os.getenv("ADP_CERT_PEM")
+    cert_key = os.getenv("ADP_CERT_KEY")
 
-    try:
-        response = requests.post(ADP_TOKEN_URL, headers=headers, data=data)
-        response.raise_for_status()
-        return response.json().get("access_token")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to get ADP token: {str(e)}")
+    if not all([token_url, client_id, client_secret, cert_pem, cert_key]):
+        logging.error("Missing ADP configuration variables.")
         return None
 
-# Retrieve employees from ADP
-def get_adp_employees():
-    """Fetch employee data from ADP API"""
-    token = get_adp_token()
-    if not token:
+    payload = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret
+    }
+
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    cert = (cert_pem, cert_key)
+    try:
+        response = requests.post(token_url, headers=headers, data=payload, cert=cert)
+        response.raise_for_status()
+        token = response.json().get("access_token")
+        return token
+    except Exception as e:
+        logging.error(f"ADP token retrieval failed: {e}")
+        return None
+
+def get_adp_employees(token, employee_id=None):
+    employee_url = os.getenv("ADP_EMPLOYEE_URL")
+    if not employee_url:
+        logging.error("ADP_EMPLOYEE_URL not set!")
         return None
 
     headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(employee_url, headers=headers)
+    if response.ok:
+        employees = response.json().get('workers', [])
+        if employee_id:
+            return [emp for emp in employees if emp.get('employeeId') == employee_id]
+        return employees
+    logging.error(f"Error retrieving employees: {response.text}")
+    return None
 
-    try:
-        response = requests.get(ADP_EMPLOYEE_URL, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to fetch employees from ADP: {str(e)}")
-        return None
-
-# Generate unique email by checking LDAP (Active Directory)
-def get_unique_email(first_name, last_name, domain):
-    """Generate a unique email by checking if it already exists in AD"""
-    base_email = f"{first_name.lower()}{last_name.lower()}"
-    email = f"{base_email}@{domain}"
-
-    try:
-        # Connect to LDAP
-        server = Server(LDAP_SERVER, get_info=ALL)
-        conn = Connection(server, LDAP_USER, LDAP_PASSWORD, auto_bind=True)
-        conn.start_tls()  # Secure connection
-
-        counter = 1
-        while True:
-            conn.search(LDAP_SEARCH_BASE, f"(mail={email})", attributes=["mail"])
-            if not conn.entries:
-                break  # Email is unique, stop loop
-
-            # If email is taken, append a number
-            email = f"{base_email}{counter}@{domain}"
-            counter += 1
-
-        return email
-    except Exception as e:
-        logging.error(f"LDAP email lookup failed: {str(e)}")
-        return f"{base_email}@{domain}"  # Fallback email
-
-# Get Microsoft Graph Token
-def get_graph_token():
-    """Authenticate with Microsoft Graph API"""
-    app = ConfidentialClientApplication(
-        GRAPH_CLIENT_ID,
-        authority=f"https://login.microsoftonline.com/{GRAPH_TENANT_ID}",
-        client_credential=GRAPH_CLIENT_SECRET
-    )
-    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-    
-    if "access_token" in result:
-        return result["access_token"]
-    else:
-        logging.error(f"Failed to get Graph API token: {result.get('error_description')}")
-        return None
-
-# Format data for Microsoft Entra API
-def generate_bulk_upload_payload(employees):
-    """Format user data from ADP for Microsoft Entra API"""
-    if not employees or "workers" not in employees:
-        logging.warning("No valid employee data received.")
-        return {"values": []}
-
-    bulk_data = []
-    for emp in employees["workers"]:
-        try:
-            first_name = emp["legalFirstName"]
-            last_name = emp["legalLastName"]
-            employee_id = emp["workerID"]["idValue"]
-            email = get_unique_email(first_name, last_name, "cfsbrands.com")
-
-            bulk_data.append({
-                "id": employee_id,
-                "action": "Create",
-                "data": {
-                    "externalId": employee_id,
-                    "displayName": f"{first_name} {last_name}",
-                    "givenName": first_name,
-                    "sn": last_name,
-                    "mail": email,
-                    "sAMAccountName": f"{first_name.lower()}{last_name.lower()}",
-                    "userPrincipalName": email,
-                    "title": emp.get("businessTitle", "Employee")  # Default title
-                }
-            })
-        except KeyError as e:
-            logging.error(f"Error processing employee record: {str(e)}")
-
-    return {"values": bulk_data}
-
-# Azure Function Trigger
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    """Azure Function Entry Point"""
-    logging.info("Starting Azure Function for ADP → Microsoft Entra Provisioning")
-
-    employees = get_adp_employees()
-    if not employees:
-        return func.HttpResponse("Error fetching employee data.", status_code=500)
-
-    bulk_payload = generate_bulk_upload_payload(employees)
-    if not bulk_payload["values"]:
-        return func.HttpResponse("No valid employees to provision.", status_code=200)
-
-    token = get_graph_token()
+# Azure Functions
+@app.function_name(name="process_request")
+@app.route(route="process", methods=["GET"])
+def process_request(req: func.HttpRequest) -> func.HttpResponse:
+    employee_id = req.params.get('employeeId')
+    token = get_adp_token()
     if not token:
-        return func.HttpResponse("Failed to get Graph API token.", status_code=500)
+        return func.HttpResponse("Failed to retrieve ADP token", status_code=500)
 
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    service_principal_id = os.getenv("GRAPH_SERVICE_PRINCIPAL_ID")  # Ensure you store this
-    job_id = os.getenv("GRAPH_JOB_ID")  # Ensure this is correct
+    employees = get_adp_employees(token, employee_id)
+    if employees is None or (employee_id and not employees):
+        return func.HttpResponse(f"No employee found with ID {employee_id}", status_code=404)
 
-    graph_url = GRAPH_BULK_UPLOAD_URL.format(servicePrincipalId=service_principal_id, jobId=job_id)
+    return func.HttpResponse(json.dumps(employees), mimetype="application/json", status_code=200)
+
+@app.function_name(name="local_user_creation")
+@app.route(route="create-local-user", methods=["POST"])
+def local_user_creation(req: func.HttpRequest) -> func.HttpResponse:
+    user_data = req.get_json()
+
+    ldap_server = os.getenv("LDAP_SERVER")
+    ldap_user = os.getenv("LDAP_USER")
+    ldap_password = os.getenv("LDAP_PASSWORD")
+    ldap_base = "ou=US.Employees,us=corp,dc=corp,dc=corp"
+
+    if not all([ldap_server, ldap_user, ldap_password]):
+        logging.error("Missing LDAP configurations.")
+        return func.HttpResponse("LDAP config error", status_code=500)
+
+    server = Server(ldap_server, get_info=ALL)
+    conn = Connection(server, ldap_user, ldap_password, auto_bind=True)
+
+    first = user_data["firstName"].strip()
+    last = user_data.get("lastName", "").strip()
+    display_name = f"{first} {last}"
+
+    sam_account_name = (first[0] + last).lower()[:10]
+
+    attributes = {
+        "objectClass": ["top", "person", "organizationalPerson", "user"],
+        "cn": displayName,
+        "givenName": first,
+        "sn": last,
+        "displayName": displayName,
+        "userPrincipalName": f"{first.lower()}.{last.lower()}@corp.cfsbrands.com",
+        "mail": f"{first.lower()}.{last.lower()}@cfsbrands.com",
+        "sAMAccountName": sAMAccountName,
+        "employeeID": user_data["employeeId"],
+        "title": user_data.get("title", ""),
+        "department": user_data.get("department", ""),
+        "l": user_data.get("L", ""),
+        "postalCode": user_data.get("postalCode", ""),
+        "st": user_data.get("st", ""),
+        "streetAddress": user_data.get("streetAddress", ""),
+        "co": user_data.get("co", ""),
+        "company": user_data.get("company", ""),
+        "mail": f"{first.lower()}.{last.lower()}@cfsbrands.com",
+        "accountDisabled": False if user_data.get("status", "").lower() == "active" else True,
+        "employeeID": user_data["employeeId"]
+    }
+
+    # sAMAccountName logic
+    if len(last) > 9:
+        samAccountName = (first[0] + last[:9]).lower()
+    else:
+        samAccountName = (first[0] + last).lower()
+    attributes["sAMAccountName"] = samAccountName
+
+    # Lookup manager
+    manager_name = user_data.get("manager")
+    if manager_name:
+        conn.search(ldap_search_base, f"(cn={manager_name})", SUBTREE, attributes=["cn"])
+        if conn.entries:
+            attributes["manager"] = conn.entries[0].entry_dn
+        else:
+            logging.warning(f"Manager {manager_name} not found.")
 
     try:
-        response = requests.post(graph_url, headers=headers, json=bulk_payload)
-        response.raise_for_status()
-        return func.HttpResponse("User provisioning successful.", status_code=200)
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Graph API Bulk Upload failed: {str(e)}")
-        return func.HttpResponse("Provisioning failed.", status_code=500)
+        dn = f"CN={displayName},{ldap_search_base}"
+        conn.add(dn, attributes=attributes)
+        if conn.result["description"] == "success":
+            logging.info(f"User created: {dn}")
+            return func.HttpResponse(f"User created with DN: {dn}", status_code=201)
+        else:
+            logging.error(f"Failed LDAP operation: {conn.result}")
+            return func.HttpResponse(f"AD creation error: {conn.result['message']}", status_code=500)
+    except Exception as e:
+        logging.error(f"LDAP provisioning error: {e}")
+        return func.HttpResponse(f"Error provisioning user: {e}", status_code=500)
