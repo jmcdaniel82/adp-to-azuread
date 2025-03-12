@@ -84,32 +84,6 @@ Scheduled Sync
 
 Runs automatically to provision users who have a hire date matching today's date.
 
-Manual Testing
-
-Process Request:GET http://localhost:7071/api/process?employeeId=<EMPLOYEE_ID>
-
-Create Local User (Manual)
-
-Provision a local AD user manually for testing:
-
-POST to /api/create-local-user with JSON payload:
-
-{
-  "employeeId": "1274578890",
-  "firstName": "Johnny",
-  "lastName": "Doeray",
-  "co": "USA",
-  "company": "CFS Brands",
-  "department": "Sales",
-  "L": "New York",
-  "postalCode": "10001",
-  "st": "NY",
-  "streetAddress": "123 5th Avenue",
-  "title": "Sales Manager",
-  "manager": "Jane Smith",
-  "status": "Active"
-}
-
 Troubleshooting
 
 Verify certificates (.pem and .key) are correctly uploaded and paths specified accurately.
