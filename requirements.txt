@@ -1,13 +1,16 @@
 # Core HTTP, OAuth and Azure SDKs
-requests==2.28.1                     # HTTP client
-msal==1.22.0                         # ADAL/Msal OAuth2 flows
-azure-functions==1.14.0              # Azure Functions Python worker SDK
+requests==2.32.2                     # HTTP client
+msal==1.32.3                         # ADAL/Msal OAuth2 flows
+azure-functions==1.22.1              # Azure Functions Python worker SDK
 azure-functions-devops-build         # (if you use DevOps build tasks)
-azure-identity==1.12.0               # Managed identity & credential libraries
+azure-identity==1.16.1               # Managed identity & credential libraries
 azure-keyvault-certificates==4.7.0   # Key Vault certificate retrieval
-azure-keyvault-secrets==4.7.0        # Key Vault secret retrieval
+azure-keyvault-secrets==4.9.0        # Key Vault secret retrieval
+azure-identity==1.16.1               # Managed identity & credential libraries
+azure-keyvault-certificates==4.9.0   # Key Vault certificate retrieval
+azure-keyvault-secrets==4.9.0        # Key Vault secret retrieval
 azure-keyvault-keys==4.7.0           # Key Vault key operations
-azure-storage-blob==12.10.0          # Blob storage SDK
+azure-storage-blob==12.25.1          # Blob storage SDK
 
 # LDAP + LDAPS + NTLM/Kerberos
 ldap3==2.9.1                         # RFC-compliant LDAP v3 client

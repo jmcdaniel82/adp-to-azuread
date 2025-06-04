@@ -113,6 +113,33 @@ Configuration
 
 Set the environment variables listed above either in Azure or in a local `.env` file when running locally. At minimum `ADP_*` variables for the ADP API and `LDAP_*` variables for your directory must be supplied.
 
+### Setting variables locally
+
+Create a file named `.env` in the project root and add the variables in `KEY=value` format. A minimal example:
+
+```bash
+ADP_TOKEN_URL=https://api.adp.example/oauth/token
+ADP_EMPLOYEE_URL=https://api.adp.example/workers
+ADP_CLIENT_ID=<client id>
+ADP_CLIENT_SECRET=<client secret>
+ADP_CERT_PEM=/path/to/client.pem
+ADP_CERT_KEY=/path/to/client.key
+LDAP_SERVER=ldaps://dc.example.com
+LDAP_USER=EXAMPLE\\service-account
+LDAP_PASSWORD=<password>
+LDAP_SEARCH_BASE=OU=Employees,DC=example,DC=com
+LDAP_CREATE_BASE=OU=Employees,DC=example,DC=com
+CA_BUNDLE_PATH=/path/to/ca-bundle.crt
+```
+
+Load these values in your shell before running the application:
+
+```bash
+set -a
+source .env
+set +a
+```
+
 Running Locally
 ---------------
 
@@ -132,6 +159,28 @@ func azure functionapp publish <APP_NAME>
 ```
 
 This repository also includes a GitHub Actions workflow that builds and deploys the Function App on pushes to the `main` branch.
+
+
+Testing and Linting
+-------------------
+
+Install the optional development tools:
+
+```bash
+pip install pytest flake8
+```
+
+Run the test suite:
+
+```bash
+pytest
+```
+
+Check code style with flake8:
+
+```bash
+flake8
+```
 
 License
 -------
