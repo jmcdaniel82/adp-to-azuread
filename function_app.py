@@ -32,7 +32,8 @@ def get_adp_token():
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     try:
-        resp = requests.post(token_url, headers=headers, data=payload, cert=(cert_pem, cert_key))
+        resp = requests.post(token_url, headers=headers, data=payload,
+                              cert=(cert_pem, cert_key), timeout=10)
         resp.raise_for_status()
         return resp.json().get("access_token")
     except Exception as e:
@@ -194,7 +195,7 @@ def get_adp_employees(token):
 
     while True:
         url = f"{base_url}?limit={limit}&offset={offset}"
-        response = requests.get(url, headers=headers, cert=cert)
+        response = requests.get(url, headers=headers, cert=cert, timeout=10)
         if not response.ok:
             logging.error(f"Failed to retrieve employees: {response.text}")
             break
