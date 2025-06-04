@@ -125,7 +125,7 @@ def get_created_date(emp):
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         return d
-    except:
+    except Exception:
         return None
 
 
@@ -434,7 +434,7 @@ def debug_employee(req: func.HttpRequest) -> func.HttpResponse:
 def test_create_local_user(req: func.HttpRequest) -> func.HttpResponse:
     try:
         emp = req.get_json()
-    except:
+    except Exception:
         return func.HttpResponse("Bad JSON", status_code=400)
     ldap_srv = os.getenv("LDAP_SERVER")
     ldap_usr = os.getenv("LDAP_USER")
