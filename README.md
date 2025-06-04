@@ -78,6 +78,10 @@ LDAP_PASSWORD
 
 LDAP_SEARCH_BASE
 
+LDAP_CREATE_BASE
+
+CA_BUNDLE_PATH
+
 Azure Function Endpoints
 
 Scheduled Sync
@@ -91,3 +95,40 @@ Verify certificates (.pem and .key) are correctly uploaded and paths specified a
 Ensure manager lookup base (LDAP_SEARCH_BASE) encompasses all possible sub-OUs.
 
 Check logs in Azure Functions for detailed error messages.
+
+Installation
+------------
+
+1. Install Python 3.10+ and [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local).
+2. Create a virtual environment and install dependencies:
+
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+Configuration
+-------------
+
+Set the environment variables listed above either in Azure or in a local `.env` file when running locally. At minimum `ADP_*` variables for the ADP API and `LDAP_*` variables for your directory must be supplied.
+
+Running Locally
+---------------
+
+With the environment configured, start the function host:
+
+```bash
+func start
+```
+
+Deployment
+----------
+
+Deploy the function app using the Azure CLI or Azure Functions Core Tools:
+
+```bash
+func azure functionapp publish <APP_NAME>
+```
+
+This repository also includes a GitHub Actions workflow that builds and deploys the Function App on pushes to the `main` branch.
