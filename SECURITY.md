@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you believe you have found a security vulnerability in this project, please report it privately. You may either [open a security advisory](https://github.com/cfsbrands/adp-to-azuread/security/advisories/new) or email **security@cfsbrands.com**. Please do not disclose the issue publicly until we have a chance to investigate and provide a fix.
+If you believe you have found a security vulnerability in this project, please report it privately. You may either [open a security advisory](https://github.com/cfsbrands/adp-to-azuread/security/advisories/new) or email **HelpDesk@CFSBrands.com**. Please do not disclose the issue publicly until we have a chance to investigate and provide a fix.
 
 ## Supported Versions
 
