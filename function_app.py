@@ -117,19 +117,6 @@ def get_termination_date(emp):
     return None
 
 
-def get_created_date(emp):
-    v = emp.get("createdDate")
-    if not v:
-        return None
-    try:
-        d = datetime.fromisoformat(v)
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d
-    except Exception:
-        return None
-
-
 def extract_employee_id(emp):
     w = emp.get("workerID")
     if isinstance(w, dict):
