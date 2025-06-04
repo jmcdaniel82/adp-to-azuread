@@ -136,4 +136,4 @@ This repository also includes a GitHub Actions workflow that builds and deploys 
 License
 -------
 
-This project is proprietary and licensed for periptery corporate use only. See [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
