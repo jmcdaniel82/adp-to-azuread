@@ -7,7 +7,7 @@ azure-identity==1.12.0               # Managed identity & credential libraries
 azure-keyvault-certificates==4.7.0   # Key Vault certificate retrieval
 azure-keyvault-secrets==4.7.0        # Key Vault secret retrieval
 azure-keyvault-keys==4.7.0           # Key Vault key operations
-azure-storage-blob==12.10.0          # Blob storage SDK
+azure-storage-blob==12.25.1          # Blob storage SDK
 
 # LDAP + LDAPS + NTLM/Kerberos
 ldap3==2.9.1                         # RFC-compliant LDAP v3 client
