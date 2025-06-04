@@ -42,17 +42,8 @@ func_mod.TimerRequest = DummyTimerRequest
 sys.modules["azure"] = azure_mod
 sys.modules["azure.functions"] = func_mod
 
-ldap_mod = types.ModuleType("ldap3")
-ldap_mod.Server = object
-ldap_mod.Connection = object
-ldap_mod.ALL = object()
-ldap_mod.SUBTREE = object()
-ldap_mod.Tls = object
-ldap_mod.NTLM = object()
-sys.modules["ldap3"] = ldap_mod
 import re
-from function_app import get_hire_date, generate_password
-from datetime import timezone
+from function_app import get_hire_date, generate_password, provision_user_in_ad
 
 
 def test_get_hire_date_from_work_assignment():
@@ -81,4 +72,51 @@ def test_generate_password_complexity():
     assert re.search(r"[A-Z]", pwd)
     assert re.search(r"\d", pwd)
     assert re.search(r"[!@#$%^&*()\-_=+\[\]{}|;:,.<>?]", pwd)
+
+
+class DummyConn:
+    def __init__(self):
+        self.entries = []
+        self.add_called = None
+        self.modify_calls = []
+        microsoft = types.SimpleNamespace(modify_password=self.modify_password)
+        self.extend = types.SimpleNamespace(microsoft=microsoft)
+
+    def search(self, *a, **k):
+        self.entries = []
+
+    def add(self, dn, attributes=None):
+        self.add_called = dn
+        return True
+
+    def modify_password(self, dn, pwd):
+        pass
+
+    def modify(self, dn, changes):
+        self.modify_calls.append((dn, changes))
+        return True
+
+
+def _make_emp(name):
+    return {
+        "person": {"preferredName": {"formattedName": name}},
+        "workAssignments": [
+            {"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}
+        ],
+        "workerID": {"idValue": "123"},
+    }
+
+
+def test_provision_user_dn_escapes_comma():
+    conn = DummyConn()
+    emp = _make_emp("Smith, Bob")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_called == "CN=Smith\\, Bob,ou=Users,dc=example,dc=com"
+
+
+def test_provision_user_dn_escapes_equal():
+    conn = DummyConn()
+    emp = _make_emp("Foo=Bar")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_called == "CN=Foo\\=Bar,ou=Users,dc=example,dc=com"
 
