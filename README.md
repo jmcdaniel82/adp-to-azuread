@@ -132,3 +132,8 @@ func azure functionapp publish <APP_NAME>
 ```
 
 This repository also includes a GitHub Actions workflow that builds and deploys the Function App on pushes to the `main` branch.
+
+License
+-------
+
+This project is proprietary and licensed for periptery corporate use only. See [LICENSE](LICENSE) for details.
