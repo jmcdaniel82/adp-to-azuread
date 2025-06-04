@@ -227,10 +227,6 @@ def get_status(emp):
 def get_user_account_control(emp):
     return 512 if get_status(emp)=="Active" else 514
 
-def generate_password(length=24):
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+[]{}|;:,.<>?"
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
 # ---------------------------
 # LDAP Provisioning
 # ---------------------------
@@ -367,7 +363,7 @@ def test_create_local_user(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse("OK", status_code=200)
 
 # ---------------------------
-# Scheduled sync every 15m (with 6-day lookback)
+# Scheduled sync every 15m (with 0-day lookback- can be adjusted for testing purposes)
 # ---------------------------
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
 def scheduled_adp_sync(mytimer: func.TimerRequest):
