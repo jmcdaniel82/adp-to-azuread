@@ -7,7 +7,7 @@ import ssl
 import secrets
 import string
 import azure.functions as func
-from ldap3 import Server, Connection, ALL, SUBTREE, Tls, NTLM
+from ldap3 import Server, Connection, SUBTREE, Tls, NTLM
 from datetime import datetime, timezone, timedelta
 
 app = func.FunctionApp()
