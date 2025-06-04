@@ -3,9 +3,6 @@ requests==2.32.2                     # HTTP client
 msal==1.22.0                         # ADAL/Msal OAuth2 flows
 azure-functions==1.22.1              # Azure Functions Python worker SDK
 azure-functions-devops-build         # (if you use DevOps build tasks)
-azure-identity==1.12.0               # Managed identity & credential libraries
-azure-keyvault-certificates==4.7.0   # Key Vault certificate retrieval
-azure-keyvault-secrets==4.9.0        # Key Vault secret retrieval
 azure-identity==1.16.1               # Managed identity & credential libraries
 azure-keyvault-certificates==4.9.0   # Key Vault certificate retrieval
 azure-keyvault-secrets==4.9.0        # Key Vault secret retrieval
