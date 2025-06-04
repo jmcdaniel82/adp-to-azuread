@@ -24,6 +24,7 @@ def get_adp_token():
     client_secret = os.getenv("ADP_CLIENT_SECRET")
     cert_pem = os.getenv("ADP_CERT_PEM")
     cert_key = os.getenv("ADP_CERT_KEY")
+    ca_bundle = os.getenv("CA_BUNDLE_PATH")
     if not all([token_url, client_id, client_secret, cert_pem, cert_key]):
         logging.error("Missing ADP configuration variables.")
         return None
@@ -40,6 +41,7 @@ def get_adp_token():
             data=payload,
             cert=(cert_pem, cert_key),
             timeout=10,
+            verify=ca_bundle,
         )
         resp.raise_for_status()
         return resp.json().get("access_token")
@@ -225,11 +227,18 @@ def get_adp_employees(token):
     offset = 0
     base_url = os.getenv("ADP_EMPLOYEE_URL")
     cert = (os.getenv("ADP_CERT_PEM"), os.getenv("ADP_CERT_KEY"))
+    ca_bundle = os.getenv("CA_BUNDLE_PATH")
     headers = {"Authorization": f"Bearer {token}"}
 
     while True:
         url = f"{base_url}?limit={limit}&offset={offset}"
-        response = requests.get(url, headers=headers, cert=cert, timeout=10)
+        response = requests.get(
+            url,
+            headers=headers,
+            cert=cert,
+            timeout=10,
+            verify=ca_bundle,
+        )
         if not response.ok:
             logging.error(f"Failed to retrieve employees: {response.text}")
             break

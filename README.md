@@ -80,7 +80,7 @@ LDAP_SEARCH_BASE
 
 LDAP_CREATE_BASE
 
-CA_BUNDLE_PATH
+CA_BUNDLE_PATH (path to a CA bundle used for verifying ADP and LDAP TLS connections)
 
 Azure Function Endpoints
 
@@ -141,6 +141,10 @@ LDAP_SEARCH_BASE=OU=Employees,DC=example,DC=com
 LDAP_CREATE_BASE=OU=Employees,DC=example,DC=com
 CA_BUNDLE_PATH=/path/to/ca-bundle.crt
 ```
+
+`CA_BUNDLE_PATH` should point to a PEM file containing trusted certificates.
+It is used to verify TLS connections when contacting the ADP API and when
+binding to LDAP over SSL.
 
 Load these values in your shell before running the application:
 
