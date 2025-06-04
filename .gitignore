@@ -38,6 +38,7 @@ env.bak/
 venv.bak/
 
 # Byte-compiled / optimized / DLL files
+# Python bytecode cache directories
 __pycache__/
 *.py[cod]
 *$py.class
@@ -46,3 +47,4 @@ __pycache__/
 __blobstorage__
 __queuestorage__
 __azurite_db*__.json
+azurite/*.log

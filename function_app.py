@@ -8,6 +8,7 @@ import secrets
 import string
 import azure.functions as func
 from ldap3 import Server, Connection, SUBTREE, Tls, NTLM
+from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta
 
 app = func.FunctionApp()
@@ -157,11 +158,6 @@ def get_full_name(person):
 # ---------------------------
 def sanitize_string_for_sam(s):
     return re.sub(r"[^a-zA-Z0-9]", "", s)
-
-
-def escape_dn(s):
-    return s.replace(",", "\\,").replace("=", "\\=")
-
 
 def extract_assignment_field(emp, field):
     wa = emp.get("workAssignments", [])
@@ -372,7 +368,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     }
     final_attrs = {k: v for k, v in attrs.items() if v or k in mandatory}
 
-    dn = f"CN={escape_dn(full_name)},{ldap_create_base}"
+    dn = f"CN={escape_rdn(full_name)},{ldap_create_base}"
     if not conn.add(dn, attributes=final_attrs):
         logging.error(f"Add failed for {dn}: {conn.result}")
         return
@@ -525,7 +521,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     ldap_create_base = os.getenv("LDAP_CREATE_BASE")
     ca_bundle = os.getenv("CA_BUNDLE_PATH")
 
-    logging.debug(f"Connecting to LDAP {ldap_server} as {ldap_user}")
+    logging.debug("Connecting to LDAP server")
     tls_config = Tls(
         ca_certs_file=ca_bundle,
         validate=ssl.CERT_REQUIRED,
