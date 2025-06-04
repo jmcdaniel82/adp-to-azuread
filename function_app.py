@@ -482,13 +482,17 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     server = Server(
         ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None
     )
-    conn = Connection(
-        server,
-        user=ldap_user,
-        password=ldap_password,
-        authentication=NTLM,
-        auto_bind=True,
-    )
+    try:
+        conn = Connection(
+            server,
+            user=ldap_user,
+            password=ldap_password,
+            authentication=NTLM,
+            auto_bind=True,
+        )
+    except Exception as e:
+        logging.error(f"❌ Failed to connect to LDAP server: {e}")
+        return
     logging.info("🔗 LDAP connection opened")
 
     for emp in employees_recent:
