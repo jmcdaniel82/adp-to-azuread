@@ -229,7 +229,11 @@ def get_adp_employees(token):
 
     while True:
         url = f"{base_url}?limit={limit}&offset={offset}"
-        response = requests.get(url, headers=headers, cert=cert, timeout=10)
+        try:
+            response = requests.get(url, headers=headers, cert=cert, timeout=10)
+        except requests.RequestException as e:
+            logging.error(f"Failed to retrieve employees: {e}")
+            return None
         if not response.ok:
             logging.error(f"Failed to retrieve employees: {response.text}")
             break
