@@ -407,59 +407,7 @@ def generate_password(length: int = 24) -> str:
             return pwd
 
 
-# ---------------------------
-# Debug endpoint
-# ---------------------------
-@app.function_name(name="debug_employee")
-@app.route(route="debug", methods=["GET"])
-def debug_employee(req: func.HttpRequest) -> func.HttpResponse:
-    token = get_adp_token()
-    if not token:
-        return func.HttpResponse("No token", status_code=500)
-    emps = get_adp_employees(token)
-    if not emps:
-        return func.HttpResponse("No emps", status_code=404)
-    eid = req.params.get("employeeId")
-    emp = next((e for e in emps if extract_employee_id(e) == eid), emps[0])
-    return func.HttpResponse(
-        json.dumps(emp, indent=2), mimetype="application/json"
-    )
 
-
-# ---------------------------
-# Test create via HTTP
-# ---------------------------
-@app.function_name(name="test_create_local_user")
-@app.route(route="testcreate", methods=["POST"])
-def test_create_local_user(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        emp = req.get_json()
-    except Exception:
-        return func.HttpResponse("Bad JSON", status_code=400)
-    ldap_srv = os.getenv("LDAP_SERVER")
-    ldap_usr = os.getenv("LDAP_USER")
-    ldap_pwd = os.getenv("LDAP_PASSWORD")
-    search_b = os.getenv("LDAP_SEARCH_BASE")
-    create_b = os.getenv("LDAP_CREATE_BASE")
-    ca_bundle = os.getenv("CA_BUNDLE_PATH")
-    if not all([ldap_srv, ldap_usr, ldap_pwd, search_b, create_b, ca_bundle]):
-        return func.HttpResponse("Missing config", status_code=500)
-    tls = Tls(
-        ca_certs_file=ca_bundle,
-        validate=ssl.CERT_REQUIRED,
-        version=ssl.PROTOCOL_TLSv1_2,
-    )
-    server = Server(ldap_srv, port=636, use_ssl=True, tls=tls, get_info=None)
-    conn = Connection(
-        server,
-        user=ldap_usr,
-        password=ldap_pwd,
-        authentication=NTLM,
-        auto_bind=True,
-    )
-    provision_user_in_ad(emp, conn, search_b, create_b)
-    conn.unbind()
-    return func.HttpResponse("OK", status_code=200)
 
 
 # ---------------------------
