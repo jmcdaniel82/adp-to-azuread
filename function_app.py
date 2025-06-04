@@ -525,7 +525,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     ldap_create_base = os.getenv("LDAP_CREATE_BASE")
     ca_bundle = os.getenv("CA_BUNDLE_PATH")
 
-    logging.debug(f"Connecting to LDAP {ldap_server} as {ldap_user}")
+    logging.debug("Connecting to LDAP server")
     tls_config = Tls(
         ca_certs_file=ca_bundle,
         validate=ssl.CERT_REQUIRED,
