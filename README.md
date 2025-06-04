@@ -88,6 +88,16 @@ Scheduled Sync
 
 Runs automatically to provision users who have a hire date matching today's date.
 
+Manual HTTP Trigger
+
+The `HttpTrigger1` function requires a function-level key. When invoking the
+endpoint, include the key using the `code` query string parameter or the
+`x-functions-key` header. Example:
+
+```
+curl -X POST "https://<APP_NAME>.azurewebsites.net/api/HttpTrigger1?code=<FUNCTION_KEY>"
+```
+
 Troubleshooting
 
 Verify certificates (.pem and .key) are correctly uploaded and paths specified accurately.
