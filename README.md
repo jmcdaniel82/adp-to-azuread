@@ -160,6 +160,7 @@ func azure functionapp publish <APP_NAME>
 
 This repository also includes a GitHub Actions workflow that builds and deploys the Function App on pushes to the `main` branch.
 
+
 Testing and Linting
 -------------------
 
@@ -180,3 +181,8 @@ Check code style with flake8:
 ```bash
 flake8
 ```
+
+License
+-------
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
