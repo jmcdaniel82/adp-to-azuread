@@ -10,6 +10,6 @@ azure-keyvault-keys==4.7.0           # Key Vault key operations
 azure-storage-blob==12.10.0          # Blob storage SDK
 
 # LDAP + LDAPS + NTLM/Kerberos
-ldap3==2.9.1                         # RFC-compliant LDAP v3 client :contentReference[oaicite:7]{index=7}
-pycryptodome>=3.15.0                 # Provides MD4 for NTLM :contentReference[oaicite:8]{index=8}
-winkerberos; platform_system=="Windows"    # Kerberos/SPNEGO on Windows :contentReference[oaicite:9]{index=9}
+ldap3==2.9.1                         # RFC-compliant LDAP v3 client
+pycryptodome>=3.15.0                 # Provides MD4 for NTLM
+winkerberos; platform_system=="Windows"    # Kerberos/SPNEGO on Windows
