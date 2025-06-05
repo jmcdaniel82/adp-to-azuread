@@ -515,35 +515,13 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
     )[:5]
     out = []
     for emp in sorted_emps:
-        fn = get_full_name(emp.get("person", {}))
         eid = extract_employee_id(emp)
         hd = get_hire_date(emp)
-        td = get_termination_date(emp)
         out.append(
             {
-                "name": fn,
                 "employeeId": eid,
                 "hireDate": hd,
-                "termDate": td,
-                "title": extract_assignment_field(emp, "jobTitle"),
-                "department": extract_department(emp),
-                "L": extract_work_address_field(emp, "cityName"),
-                "postalCode": extract_work_address_field(emp, "postalCode"),
-                "state": extract_state_from_work(emp),
-                "streetAddress": extract_work_address_field(emp, "lineOne"),
-                "country": extract_work_address_field(emp, "countryCode"),
-                "company": extract_company(emp),
                 "status": get_status(emp),
-                "samAccountName": sanitize_string_for_sam(
-                    (fn.split()[0][0].lower() + fn.split()[1].lower())
-                    if fn and len(fn.split()) > 1
-                    else ""
-                ),
-                "email": (
-                    f"{sanitize_string_for_sam(fn.split()[0].lower())}{sanitize_string_for_sam(fn.split()[1].lower())}@cfsbrands.com"
-                    if fn and len(fn.split()) > 1
-                    else ""
-                ),
             }
         )
     return func.HttpResponse(
