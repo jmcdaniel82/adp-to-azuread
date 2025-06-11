@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 app = func.FunctionApp()
 
 def get_adp_token():
+    """Retrieve an OAuth access token from ADP using client credentials."""
     token_url = os.getenv("ADP_TOKEN_URL")
     client_id = os.getenv("ADP_CLIENT_ID")
     client_secret = os.getenv("ADP_CLIENT_SECRET")
@@ -43,6 +44,7 @@ def get_adp_token():
         return None
 
 def get_hire_date(employee):
+    """Return the most relevant hire date in ISO format for an employee."""
     wa = employee.get("workAssignments")
     if isinstance(wa, list) and wa:
         for key in ("hireDate", "actualStartDate"):
@@ -85,6 +87,7 @@ def get_hire_date(employee):
     return None
 
 def get_termination_date(emp):
+    """Return the termination date for an employee, if present."""
     wd = emp.get("workerDates")
     if isinstance(wd, list):
         for item in wd:
@@ -95,12 +98,14 @@ def get_termination_date(emp):
     return None
 
 def extract_employee_id(emp):
+    """Extract the employee ID from the ADP worker record."""
     w = emp.get("workerID")
     if isinstance(w, dict):
         return w.get("idValue", "")
     return w or ""
 
 def get_full_name(person):
+    """Build a display name from the preferred or legal name fields."""
     pref = person.get("preferredName", {})
     if pref.get("formattedName"):
         return pref["formattedName"]
@@ -116,13 +121,16 @@ def get_full_name(person):
     return f"{first} {last}".strip()
 
 def sanitize_string_for_sam(s):
+    """Remove non-alphanumeric characters for a sAMAccountName."""
     return re.sub(r"[^a-zA-Z0-9]", "", s)
 
 def extract_assignment_field(emp, field):
+    """Return a value from the employee's first work assignment."""
     wa = emp.get("workAssignments", [])
     return wa[0].get(field, "") if wa else ""
 
 def extract_department(emp):
+    """Retrieve the department short name from work assignments."""
     wa = emp.get("workAssignments", [])
     if not wa:
         return ""
@@ -135,6 +143,7 @@ def extract_department(emp):
     return ""
 
 def extract_company(emp):
+    """Retrieve the company or business unit name from work assignments."""
     wa = emp.get("workAssignments", [])
     if not wa:
         return ""
@@ -150,6 +159,7 @@ def extract_company(emp):
     return ""
 
 def extract_work_address_field(emp, field):
+    """Return a specific address field from the assigned work location."""
     wa = emp.get("workAssignments", [])
     if wa and wa[0].get("assignedWorkLocations"):
         addr = wa[0]["assignedWorkLocations"][0].get("address", {})
@@ -157,6 +167,7 @@ def extract_work_address_field(emp, field):
     return ""
 
 def extract_state_from_work(emp):
+    """Return the state or province code from the work address."""
     wa = emp.get("workAssignments", [])
     if wa and wa[0].get("assignedWorkLocations"):
         cs = wa[0]["assignedWorkLocations"][0].get("address", {}).get("countrySubdivisionLevel1", {})
@@ -164,6 +175,7 @@ def extract_state_from_work(emp):
     return ""
 
 def get_adp_employees(token):
+    """Retrieve all employee records from ADP, handling pagination."""
     employees = []
     limit = 50
     offset = 0
@@ -193,6 +205,7 @@ def get_adp_employees(token):
     return employees_with_hire_date
 
 def get_status(emp):
+    """Determine if an employee is Active or Inactive."""
     hd = get_hire_date(emp)
     td = get_termination_date(emp)
     if not hd:
@@ -211,9 +224,11 @@ def get_status(emp):
     return "Active" if t > now else "Inactive"
 
 def get_user_account_control(emp):
+    """Map employee status to the userAccountControl flag."""
     return 512 if get_status(emp) == "Active" else 514
 
 def generate_password(length: int = 24) -> str:
+    """Generate a random complex password of the given length."""
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+[]{}|;:,.<>?"
     while True:
         pwd = "".join(secrets.choice(alphabet) for _ in range(length))
@@ -226,6 +241,7 @@ def generate_password(length: int = 24) -> str:
             return pwd
 
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
+    """Create and enable an AD user using data from ADP."""
     country_code = extract_work_address_field(user_data, "countryCode") or ""
     if not country_code.upper() or country_code.upper() == "MX":
         logging.info(f"Skipping provisioning for country code '{country_code}'")
@@ -315,6 +331,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
 # ---- Scheduled sync every 15m ----
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
 def scheduled_adp_sync(mytimer: func.TimerRequest):
+    """Timer triggered function that provisions recent hires."""
     logging.info("🔄 scheduled_adp_sync triggered")
     if mytimer.past_due:
         logging.warning("Timer is past due!")
@@ -396,6 +413,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
 @app.function_name(name="process_request")
 @app.route(route="process", methods=["POST"])
 def process_request(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP endpoint that returns a summary of recent hires."""
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Token fail", status_code=500)
