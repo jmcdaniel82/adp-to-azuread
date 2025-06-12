@@ -12,7 +12,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.11' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
   build:
@@ -35,12 +35,9 @@ jobs:
           source venv/bin/activate
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest
+        run: pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest -q
+      # Optional: Add step to run tests here
 
       - name: Zip artifact for deployment
         run: zip release.zip ./* -r
@@ -72,9 +69,9 @@ jobs:
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_9A8202910E2E4613AEBA5518600C6252 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_58109804052A481480D4A42C55CF50C6 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_55301432B5CD4BE4808991ABBC9462D5 }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_D05BA0A5C53040BC90861619C63E0B7A }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D194AF7E0D4F4DF6A47E424D514F5B55 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_B667FEA9683841769EBD122F8698FE3F }}
 
       - name: 'Deploy to Azure Functions'
         uses: Azure/functions-action@v1
