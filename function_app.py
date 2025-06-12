@@ -373,43 +373,38 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
     ldap_create_base = os.getenv("LDAP_CREATE_BASE")
     ca_bundle = os.getenv("CA_BUNDLE_PATH")
-    logging.info(f"LDAP_SERVER: {ldap_server}")
-    logging.info(f"LDAP_USER: {ldap_user}")
-    # Don't log passwords!
-    logging.info(f"CA_BUNDLE_PATH: {ca_bundle}")
-
-    # Basic checks
-    if not ldap_server or not ldap_user or not ldap_password or not ca_bundle:
-        logging.error("LDAP connection parameters missing.")
-        return None
-
+    logging.info(f"Loading CA bundle from '{ca_bundle}'")
+    if not os.path.isfile(ca_bundle):
+        logging.error(f"CA bundle not found at {ca_bundle}")
+    tls_config = Tls(
+        ca_certs_file=ca_bundle,
+        validate=ssl.CERT_REQUIRED,
+        version=ssl.PROTOCOL_TLSv1_2,
+    )
+    server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
-        tls_config = Tls(
-            ca_certs_file=ca_bundle,
-            validate=ssl.CERT_REQUIRED,
-            version=ssl.PROTOCOL_TLSv1_2
-        )
-        server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
-        logging.info("Attempting LDAP connection using NTLM...")
         conn = Connection(
             server,
             user=ldap_user,
             password=ldap_password,
             authentication=NTLM,
-            auto_bind=True
+            auto_bind=True,
         )
-        logging.info("LDAP connection successful!")
-        return conn
     except Exception as e:
-        logging.error(f"LDAP connection failed: {e}", exc_info=True)
-        # Show helpful advice for common NTLM errors
-        if "NTLM needs domain" in str(e):
-            logging.error("Hint: NTLM requires DOMAIN\\username format for LDAP_USER.")
-        elif "certificate verify failed" in str(e):
-            logging.error("Hint: Check that your CA bundle is correct and includes the issuing CA for the LDAP server's certificate.")
-        else:
-            logging.error("Hint: Double-check your server address, credentials, and firewall settings.")
-        return None
+        logging.error(f"❌ Failed to connect to LDAP server: {e}")
+        return
+    logging.info("🔗 LDAP connection opened")
+    for emp in employees_recent:
+        emp_id = extract_employee_id(emp)
+        person = emp.get("person", {})
+        name = get_full_name(person) or "<no name>"
+        logging.info(f"➡️  Processing {emp_id} / {name}")
+        try:
+            provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base)
+        except Exception as e:
+            logging.error(f"❌ Exception provisioning {emp_id}: {e}")
+    conn.unbind()
+    logging.info("🔒 LDAP connection closed — scheduled_adp_sync complete")
 
 
 # ---------------------------
