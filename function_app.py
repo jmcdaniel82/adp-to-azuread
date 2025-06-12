@@ -387,7 +387,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
         tls_config = Tls(
             ca_certs_file=ca_bundle,
             validate=ssl.CERT_REQUIRED,
-            version=ssl.PROTOCOL_TLSv1_3
+            version=ssl.PROTOCOL_TLSv1_2
         )
         server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
         logging.info("Attempting LDAP connection using NTLM...")
