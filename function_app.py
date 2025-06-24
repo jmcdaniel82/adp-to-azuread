@@ -287,10 +287,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
 
     attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
-        "cn": full_name,
+        "cn": f"{first} {last}".strip(),
         "givenName": first,
         "sn": last,
-        "displayName": full_name,
+        "displayName": f"{first} {last}".strip(),
         "userPrincipalName": email,
         "mail": email,
         "sAMAccountName": sam,
