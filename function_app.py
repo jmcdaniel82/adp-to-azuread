@@ -104,21 +104,17 @@ def extract_employee_id(emp):
         return w.get("idValue", "")
     return w or ""
 
-def get_full_name(person):
-    """Build a display name from the preferred or legal name fields."""
+def get_first_last(person):
+    """Return (first, last) preferring preferredName, else legalName."""
     pref = person.get("preferredName", {})
-    if pref.get("formattedName"):
-        return pref["formattedName"]
-    first = pref.get("givenName", "")
-    last = pref.get("familyName1", "")
-    if first or last:
-        return f"{first} {last}".strip()
+    first = pref.get("givenName")
+    last = pref.get("familyName1")
+    if first and last:
+        return first, last
     legal = person.get("legalName", {})
-    if legal.get("formattedName"):
-        return legal["formattedName"]
     first = legal.get("givenName", "")
     last = legal.get("familyName1", "")
-    return f"{first} {last}".strip()
+    return first, last
 
 def sanitize_string_for_sam(s):
     """Remove non-alphanumeric characters for a sAMAccountName."""
@@ -248,7 +244,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         return
 
     person = user_data.get("person", {})
-    full_name = get_full_name(person)
+    first, last = get_first_last(person)
+    full_name = f"{first} {last}".strip()
     if not full_name:
         logging.warning(f"Skipping user with incomplete name data: {user_data}")
         return
@@ -261,9 +258,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         logging.info(f"User already provisioned: {emp_id} (hireDate={hire_date})")
         return
 
-    legal = person.get("legalName", {})
-    first = legal.get("givenName", "") or full_name.split()[0]
-    last = legal.get("familyName1", "") or (full_name.split()[1] if len(full_name.split()) > 1 else "")
+    first, last = get_first_last(person)
+    if not first:
+        # fallback to full_name parse if necessary (shouldn't happen)
+        parts = full_name.split()
+        first = parts[0] if parts else ""
+        last = parts[1] if len(parts) > 1 else ""
     base_sam = sanitize_string_for_sam((first[0].lower() + last.lower()) if first and last else "")
     base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com" if first and last else "")
 
@@ -397,7 +397,8 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     for emp in employees_recent:
         emp_id = extract_employee_id(emp)
         person = emp.get("person", {})
-        name = get_full_name(person) or "<no name>"
+        first, last = get_first_last(person)
+        name = f"{first} {last}".strip() or "<no name>"
         logging.info(f"➡️  Processing {emp_id} / {name}")
         try:
             provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base)
