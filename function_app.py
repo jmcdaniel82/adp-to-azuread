@@ -425,7 +425,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         [e for e in emps if get_hire_date(e)],
         key=lambda e: get_hire_date(e),
         reverse=True,
-    )[:20]
+    )[:5]
     out = []
     for emp in sorted_emps:
         person = emp.get("person", {})
@@ -443,6 +443,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "accountDisabled": get_status(emp) == "Inactive",
                 "sAMAccountName": base_sam,
                 "co": country_name,
+                "countryCode": country_code,
                 "company": extract_company(emp),
                 "department": extract_department(emp),
                 "displayName": full_name,
