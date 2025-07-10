@@ -425,7 +425,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         [e for e in emps if get_hire_date(e)],
         key=lambda e: get_hire_date(e),
         reverse=True,
-    )[:10]
+    )[:20]
     out = []
     for emp in sorted_emps:
         person = emp.get("person", {})
