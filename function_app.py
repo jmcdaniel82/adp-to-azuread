@@ -425,7 +425,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         [e for e in emps if get_hire_date(e)],
         key=lambda e: get_hire_date(e),
         reverse=True,
-    )[:10]
+    )[:20]
     out = []
     for emp in sorted_emps:
         person = emp.get("person", {})
@@ -449,7 +449,11 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "department": extract_department(emp),
                 "hireDate": get_hire_date(emp),
                 "terminationDate": get_termination_date(emp),
-                "workAddress": address_info,
+                "streetLineOne": address_info.get("lineOne"),
+                "cityName": address_info.get("cityName"),
+                "countrySubdivision": extract_state_from_work(emp),
+                "postalCode": address_info.get("postalCode"),
+                "countryCode": address_info.get("countryCode"),
             }
         )
     return func.HttpResponse(
