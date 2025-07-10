@@ -425,39 +425,31 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         [e for e in emps if get_hire_date(e)],
         key=lambda e: get_hire_date(e),
         reverse=True,
-    )[:30]
+    )[:5]
     out = []
     for emp in sorted_emps:
         person = emp.get("person", {})
         first, last = get_first_last(person)
-        full_name = f"{first} {last}".strip()
-        base_sam = sanitize_string_for_sam((first[0].lower() + last.lower()) if first and last else "")
-        email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com" if first and last else "")
-        country_code = extract_work_address_field(emp, "countryCode") or ""
-        country_name = "United States" if country_code.upper() == "US" else country_code
+        
+        # Safely extract the work address
+        work_assignments = emp.get("workAssignments", [])
+        address_info = {}
+        if work_assignments and isinstance(work_assignments, list):
+            work_locations = work_assignments[0].get("assignedWorkLocations", [])
+            if work_locations and isinstance(work_locations, list):
+                address_info = work_locations[0].get("address", {})
 
         out.append(
             {
                 "employeeId": extract_employee_id(emp),
-                "cn": full_name,
-                "accountDisabled": get_status(emp) == "Inactive",
-                "sAMAccountName": base_sam,
-                "co": country_name,
-                "countryCode": country_code,
+                "givenName": first,
+                "familyName": last,
+                "jobTitle": extract_assignment_field(emp, "jobTitle"),
                 "company": extract_company(emp),
                 "department": extract_department(emp),
-                "displayName": full_name,
-                "givenName": first,
-                "l": extract_work_address_field(emp, "cityName"),
-                "mail": email,
-                "postalCode": extract_work_address_field(emp, "postalCode"),
-                "sn": last,
-                "st": extract_state_from_work(emp),
-                "streetAddress": extract_work_address_field(emp, "lineOne"),
-                "title": extract_assignment_field(emp, "jobTitle"),
-                "userPrincipalName": email,
                 "hireDate": get_hire_date(emp),
-                "status": get_status(emp),
+                "terminationDate": get_termination_date(emp),
+                "workAddress": address_info,
             }
         )
     return func.HttpResponse(
