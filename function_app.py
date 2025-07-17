@@ -587,13 +587,16 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         person = emp.get("person", {})
         first, last = get_first_last(person)
         
-        # Safely extract the work address
+        # Safely extract the work address and custom fields
         work_assignments = emp.get("workAssignments", [])
         address_info = {}
+        custom_fields = {}
         if work_assignments and isinstance(work_assignments, list):
             work_locations = work_assignments[0].get("assignedWorkLocations", [])
             if work_locations and isinstance(work_locations, list):
                 address_info = work_locations[0].get("address", {})
+            custom_fields = work_assignments[0].get("customFieldGroup", {})
+
 
         out.append(
             {
@@ -610,6 +613,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "countrySubdivision": extract_state_from_work(emp),
                 "postalCode": address_info.get("postalCode"),
                 "countryCode": address_info.get("countryCode"),
+                "customFields": custom_fields,
             }
         )
     return func.HttpResponse(
