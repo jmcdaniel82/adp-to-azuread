@@ -7,7 +7,7 @@ import ssl
 import secrets
 import string
 import azure.functions as func
-from ldap3 import Server, Connection, SUBTREE, Tls, NTLM
+from ldap3 import Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta
 
@@ -124,6 +124,16 @@ def extract_assignment_field(emp, field):
     """Return a value from the employee's first work assignment."""
     wa = emp.get("workAssignments", [])
     return wa[0].get(field, "") if wa else ""
+
+def extract_business_title(emp):
+    """Extract the business title from the employee's custom fields."""
+    wa = emp.get("workAssignments", [])
+    if wa and isinstance(wa, list):
+        custom_fields = wa[0].get("customFieldGroup", {}).get("stringFields", [])
+        for field in custom_fields:
+            if field.get("nameCode") == "Business Title":
+                return field.get("stringValue")
+    return None
 
 def extract_department(emp):
     """Retrieve the department short name from work assignments."""
@@ -295,7 +305,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         "mail": email,
         "sAMAccountName": sam,
         "employeeID": emp_id,
-        "title": extract_assignment_field(user_data, "jobTitle"),
+        "title": extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle"),
         "department": extract_department(user_data),
         "l": city,
         "postalCode": postal,
@@ -327,6 +337,106 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         logging.info(f"Account enabled for {dn}")
     except Exception as e:
         logging.error(f"Password or enable failed for {dn}: {e}")
+
+def extract_manager_id(emp):
+    """Extract the manager's ID from the ADP worker record."""
+    wa = emp.get("workAssignments", [])
+    if wa:
+        reports_to = wa[0].get("reportsTo", [])
+        if reports_to:
+            manager_worker_id = reports_to[0].get("workerID", {})
+            return manager_worker_id.get("idValue")
+    return None
+
+def get_manager_dn(conn, ldap_search_base, manager_id):
+    """Look up a manager's DN in AD by their employee ID."""
+    if not manager_id:
+        return None
+    conn.search(ldap_search_base, f"(employeeID={manager_id})", attributes=["distinguishedName"])
+    if conn.entries:
+        return conn.entries[0].distinguishedName.value
+    return None
+
+def update_user_in_ad(user_data, conn, ldap_search_base):
+    """Update an existing AD user with data from ADP."""
+    emp_id = extract_employee_id(user_data)
+    if not emp_id:
+        return
+
+    # Find the user in AD
+    conn.search(ldap_search_base, f"(employeeID={emp_id})", SUBTREE, attributes=["*"])
+    if not conn.entries:
+        logging.info(f"User with employeeID {emp_id} not found in AD. Skipping update.")
+        return
+
+    user_dn = conn.entries[0].distinguishedName.value
+    ad_user = conn.entries[0]
+
+    changes = {}
+
+    # Title
+    new_title = extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle")
+    if new_title and ad_user.title != new_title:
+        changes["title"] = [(MODIFY_REPLACE, [new_title])]
+
+    # Department
+    new_dept = extract_department(user_data)
+    if new_dept and ad_user.department != new_dept:
+        changes["department"] = [(MODIFY_REPLACE, [new_dept])]
+
+    # Address
+    new_street = extract_work_address_field(user_data, "lineOne")
+    if new_street and ad_user.streetAddress != new_street:
+        changes["streetAddress"] = [(MODIFY_REPLACE, [new_street])]
+
+    new_city = extract_work_address_field(user_data, "cityName")
+    if new_city and ad_user.l != new_city:
+        changes["l"] = [(MODIFY_REPLACE, [new_city])]
+
+    new_state = extract_state_from_work(user_data)
+    if new_state and ad_user.st != new_state:
+        changes["st"] = [(MODIFY_REPLACE, [new_state])]
+
+    new_postal = extract_work_address_field(user_data, "postalCode")
+    if new_postal and ad_user.postalCode != new_postal:
+        changes["postalCode"] = [(MODIFY_REPLACE, [new_postal])]
+
+    country_code = extract_work_address_field(user_data, "countryCode")
+    if country_code:
+        country_name = "United States" if country_code.upper() == "US" else country_code
+        if ad_user.co != country_name:
+            changes["co"] = [(MODIFY_REPLACE, [country_name])]
+
+    # Manager
+    manager_id = extract_manager_id(user_data)
+    if manager_id:
+        manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+        if manager_dn and ad_user.manager != manager_dn:
+            changes["manager"] = [(MODIFY_REPLACE, [manager_dn])]
+
+    # Apply attribute changes
+    if changes:
+        conn.modify(user_dn, changes)
+        if conn.result["result"] == 0:
+            logging.info(f"Successfully updated attributes for {user_dn}")
+        else:
+            logging.error(f"Failed to update attributes for {user_dn}: {conn.result}")
+
+    # Handle termination
+    term_date_str = get_termination_date(user_data)
+    if term_date_str:
+        hire_date_str = get_hire_date(user_data)
+        term_date = datetime.fromisoformat(term_date_str)
+        hire_date = datetime.fromisoformat(hire_date_str)
+
+        if term_date > hire_date:
+            # Disable account if not already disabled
+            if int(ad_user.userAccountControl) & 2 == 0:
+                conn.modify(user_dn, {"userAccountControl": [(MODIFY_REPLACE, [514])]})
+                if conn.result["result"] == 0:
+                    logging.info(f"Disabled account for terminated user: {user_dn}")
+                else:
+                    logging.error(f"Failed to disable account for {user_dn}: {conn.result}")
 
 # ---- Scheduled sync every 15m ----
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
@@ -407,6 +517,47 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     conn.unbind()
     logging.info("🔒 LDAP connection closed — scheduled_adp_sync complete")
 
+# ---- Scheduled update sync every hour ----
+@app.schedule(schedule="0 0 * * * *", arg_name="mytimer", run_on_startup=False)
+def scheduled_adp_update_sync(mytimer: func.TimerRequest):
+    """Timer triggered function that updates existing users."""
+    logging.info("🔄 scheduled_adp_update_sync triggered")
+    token = get_adp_token()
+    if not token:
+        logging.error("❌ Failed to retrieve ADP token for update sync.")
+        return
+    logging.info("✅ ADP token acquired for update sync")
+    all_employees = get_adp_employees(token)
+    if all_employees is None:
+        logging.error("❌ get_adp_employees returned None for update sync")
+        return
+    logging.info(f"ℹ️  Retrieved {len(all_employees)} total ADP employees for update sync")
+
+    ldap_server = os.getenv("LDAP_SERVER")
+    ldap_user = os.getenv("LDAP_USER")
+    ldap_password = os.getenv("LDAP_PASSWORD")
+    ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
+    ca_bundle = os.getenv("CA_BUNDLE_PATH")
+
+    tls_config = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
+    server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
+
+    try:
+        conn = Connection(server, user=ldap_user, password=ldap_password, authentication=NTLM, auto_bind=True)
+    except Exception as e:
+        logging.error(f"❌ Failed to connect to LDAP server for update sync: {e}")
+        return
+
+    logging.info("🔗 LDAP connection opened for update sync")
+    for emp in all_employees:
+        try:
+            update_user_in_ad(emp, conn, ldap_search_base)
+        except Exception as e:
+            emp_id = extract_employee_id(emp)
+            logging.error(f"❌ Exception updating {emp_id}: {e}")
+    conn.unbind()
+    logging.info("🔒 LDAP connection closed — scheduled_adp_update_sync complete")
+
 
 # ---------------------------
 # Simple process endpoint
@@ -449,7 +600,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "employeeId": extract_employee_id(emp),
                 "givenName": first,
                 "familyName": last,
-                "jobTitle": extract_assignment_field(emp, "jobTitle"),
+                "jobTitle": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
                 "company": extract_company(emp),
                 "department": extract_department(emp),
                 "hireDate": get_hire_date(emp),
