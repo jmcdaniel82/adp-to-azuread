@@ -414,18 +414,23 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
 @app.function_name(name="process_request")
 @app.route(route="process", methods=["POST"])
 def process_request(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns a summary of recent hires."""
+    """HTTP endpoint that returns all active users with ADP/HR details."""
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Token fail", status_code=500)
     emps = get_adp_employees(token)
     if emps is None:
         return func.HttpResponse("Fail emps", status_code=500)
+
+    # Filter for only ACTIVE users
+    active_emps = [e for e in emps if get_status(e) == "Active"]
+    # Optional: sort by hire date (descending)
     sorted_emps = sorted(
-        [e for e in emps if get_hire_date(e)],
+        [e for e in active_emps if get_hire_date(e)],
         key=lambda e: get_hire_date(e),
         reverse=True,
-    )[:20]
+    )
+
     out = []
     for emp in sorted_emps:
         person = emp.get("person", {})
