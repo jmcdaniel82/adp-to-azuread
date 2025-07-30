@@ -329,7 +329,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         logging.error(f"Password or enable failed for {dn}: {e}")
 
 # ---- Scheduled sync every 15m ----
-@app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
+@app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=False)
 def scheduled_adp_sync(mytimer: func.TimerRequest):
     """Timer triggered function that provisions recent hires."""
     logging.info("🔄 scheduled_adp_sync triggered")
