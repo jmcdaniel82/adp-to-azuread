@@ -7,7 +7,7 @@ import ssl
 import secrets
 import string
 import azure.functions as func
-from ldap3 import Server, Connection, SUBTREE, Tls, NTLM
+from ldap3 import Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta
 
@@ -149,7 +149,7 @@ def extract_company(emp):
     for ou in wa[0].get("assignedOrganizationalUnits", []):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "business unit":
             return ou.get("nameCode", {}).get("shortName", "")
-    for ou in wa[0].get("homeOrganizationalUnits", []):
+    for ou in wa[0].get("homeOrganizational_units", []):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "business unit":
             return ou.get("nameCode", {}).get("shortName", "")
     return ""
@@ -435,14 +435,6 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
     for emp in sorted_emps:
         person = emp.get("person", {})
         first, last = get_first_last(person)
-        
-        # Safely extract the work address
-        work_assignments = emp.get("workAssignments", [])
-        address_info = {}
-        if work_assignments and isinstance(work_assignments, list):
-            work_locations = work_assignments[0].get("assignedWorkLocations", [])
-            if work_locations and isinstance(work_locations, list):
-                address_info = work_locations[0].get("address", {})
 
         out.append(
             {
@@ -454,11 +446,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "department": extract_department(emp),
                 "hireDate": get_hire_date(emp),
                 "terminationDate": get_termination_date(emp),
-                "streetLineOne": address_info.get("lineOne"),
-                "cityName": address_info.get("cityName"),
-                "countrySubdivision": extract_state_from_work(emp),
-                "postalCode": address_info.get("postalCode"),
-                "countryCode": address_info.get("countryCode"),
+                "workAssignments": emp.get("workAssignments", []),
             }
         )
     return func.HttpResponse(
