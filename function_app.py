@@ -1,10 +1,3 @@
-Of course. I've updated the `provision_user_in_ad` function in `function_app.py` to ensure that all new users are created with the `@cfsbrands.com` domain for their `userPrincipalName` and email address.
-
-### `function_app.py`
-
-Here is the complete, modified `function_app.py` file with the change:
-
-```python
 import os
 import json
 import logging
