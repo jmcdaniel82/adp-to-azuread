@@ -157,17 +157,25 @@ def extract_company(emp):
 def extract_work_address_field(emp, field):
     """Return a specific address field from the assigned work location."""
     wa = emp.get("workAssignments", [])
-    if wa and wa[0].get("assignedWorkLocations"):
-        addr = wa[0]["assignedWorkLocations"][0].get("address", {})
-        return addr.get(field, "")
+    if wa:
+        if wa[0].get("assignedWorkLocations"):
+            addr = wa[0]["assignedWorkLocations"][0].get("address", {})
+            return addr.get(field, "")
+        elif wa[0].get("homeWorkLocation"):
+            addr = wa[0]["homeWorkLocation"].get("address", {})
+            return addr.get(field, "")
     return ""
 
 def extract_state_from_work(emp):
     """Return the state or province code from the work address."""
     wa = emp.get("workAssignments", [])
-    if wa and wa[0].get("assignedWorkLocations"):
-        cs = wa[0]["assignedWorkLocations"][0].get("address", {}).get("countrySubdivisionLevel1", {})
-        return cs.get("codeValue", "")
+    if wa:
+        if wa[0].get("assignedWorkLocations"):
+            cs = wa[0]["assignedWorkLocations"][0].get("address", {}).get("countrySubdivisionLevel1", {})
+            return cs.get("codeValue", "")
+        elif wa[0].get("homeWorkLocation"):
+            cs = wa[0]["homeWorkLocation"].get("address", {}).get("countrySubdivisionLevel1", {})
+            return cs.get("codeValue", "")
     return ""
 
 def get_adp_employees(token):
