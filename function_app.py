@@ -273,7 +273,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         first = parts[0] if parts else ""
         last = parts[1] if len(parts) > 1 else ""
     base_sam = sanitize_string_for_sam((first[0].lower() + last.lower()) if first and last else "")
-    base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@us.corp.cfsbrands.com" if first and last else "")
+    base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com" if first and last else "")
 
     # Uniqueness check for samAccountName and mail
     sam = base_sam
@@ -285,7 +285,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             break
         count += 1
         sam = f"{base_sam}{count}"
-        email = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}@us.corp.cfsbrands.com"
+        email = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}@cfsbrands.com"
 
     postal = extract_work_address_field(user_data, "postalCode")
     state = extract_state_from_work(user_data)
