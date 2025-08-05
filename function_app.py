@@ -261,9 +261,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     emp_id = extract_employee_id(user_data)
     hire_date = get_hire_date(user_data) or "<no hire date>"
 
-    conn.search(ldap_search_base, f"(employeeID={emp_id})", SUBTREE, attributes=["employeeID"])
+    # Search the entire domain for the employeeID to prevent creating duplicates
+    conn.search(ldap_search_base, f"(employeeID={emp_id})", SUBTREE, attributes=["employeeID", "distinguishedName"])
     if conn.entries:
-        logging.info(f"User already provisioned: {emp_id} (hireDate={hire_date})")
+        logging.info(f"User already exists: {emp_id} at {conn.entries[0].distinguishedName.value}")
         return
 
     first, last = get_first_last(person)
@@ -273,10 +274,17 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         first = parts[0] if parts else ""
         last = parts[1] if len(parts) > 1 else ""
     base_sam = sanitize_string_for_sam((first[0].lower() + last.lower()) if first and last else "")
-    base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com" if first and last else "")
+    
+    # Set the UPN to the internal domain and the email to the external domain
+    upn_suffix = "@us.corp.cfsbrands.com"
+    email_suffix = "@cfsbrands.com"
+    
+    base_upn = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{upn_suffix}" if first and last else "")
+    base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{email_suffix}" if first and last else "")
 
     # Uniqueness check for samAccountName and mail
     sam = base_sam
+    upn = base_upn
     email = base_email
     count = 1
     while True:
@@ -285,7 +293,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             break
         count += 1
         sam = f"{base_sam}{count}"
-        email = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}@cfsbrands.com"
+        upn = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}{upn_suffix}"
+        email = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}{email_suffix}"
 
     postal = extract_work_address_field(user_data, "postalCode")
     state = extract_state_from_work(user_data)
@@ -299,7 +308,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         "givenName": first,
         "sn": last,
         "displayName": f"{first} {last}".strip(),
-        "userPrincipalName": email,
+        "userPrincipalName": upn,
         "mail": email,
         "sAMAccountName": sam,
         "employeeID": emp_id,
