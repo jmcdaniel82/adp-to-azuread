@@ -7,11 +7,13 @@ import ssl
 import secrets
 import string
 import azure.functions as func
-from ldap3 import Server, Connection, SUBTREE, Tls, NTLM
+from ldap3 import Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta
 
 app = func.FunctionApp()
+
+# ---- Helper functions ----
 
 def get_adp_token():
     """Retrieve an OAuth access token from ADP using client credentials."""
@@ -42,6 +44,7 @@ def get_adp_token():
     except Exception as e:
         logging.error(f"ADP token retrieval failed: {e}")
         return None
+
 
 def get_hire_date(employee):
     """Return the most relevant hire date in ISO format for an employee."""
@@ -86,6 +89,7 @@ def get_hire_date(employee):
         return max(dates).isoformat()
     return None
 
+
 def get_termination_date(emp):
     """Return the termination date for an employee, if present."""
     wd = emp.get("workerDates")
@@ -97,12 +101,14 @@ def get_termination_date(emp):
         return wd.get("terminationDate")
     return None
 
+
 def extract_employee_id(emp):
     """Extract the employee ID from the ADP worker record."""
     w = emp.get("workerID")
     if isinstance(w, dict):
         return w.get("idValue", "")
     return w or ""
+
 
 def get_first_last(person):
     """Return (first, last) preferring preferredName, else legalName."""
@@ -116,14 +122,17 @@ def get_first_last(person):
     last = legal.get("familyName1", "")
     return first, last
 
+
 def sanitize_string_for_sam(s):
     """Remove non-alphanumeric characters for a sAMAccountName."""
     return re.sub(r"[^a-zA-Z0-9]", "", s)
+
 
 def extract_assignment_field(emp, field):
     """Return a value from the employee's first work assignment."""
     wa = emp.get("workAssignments", [])
     return wa[0].get(field, "") if wa else ""
+
 
 def extract_department(emp):
     """Retrieve the department short name from work assignments."""
@@ -137,6 +146,7 @@ def extract_department(emp):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "department":
             return ou.get("nameCode", {}).get("shortName", "")
     return ""
+
 
 def extract_company(emp):
     """Retrieve the company or business unit name from work assignments."""
@@ -154,6 +164,7 @@ def extract_company(emp):
             return ou.get("nameCode", {}).get("shortName", "")
     return ""
 
+
 def extract_work_address_field(emp, field):
     """Return a specific address field from the assigned work location."""
     wa = emp.get("workAssignments", [])
@@ -165,6 +176,7 @@ def extract_work_address_field(emp, field):
             addr = wa[0]["homeWorkLocation"].get("address", {})
             return addr.get(field, "")
     return ""
+
 
 def extract_state_from_work(emp):
     """Return the state or province code from the work address."""
@@ -244,6 +256,28 @@ def generate_password(length: int = 24) -> str:
         ):
             return pwd
 
+def extract_manager_id(emp):
+    """Return the ADP associateOID of the employee's manager."""
+    wa = emp.get("workAssignments", [])
+    if wa:
+        rpt = wa[0].get("reportsTo", [{}])[0]
+        manager_info = rpt.get("workerID", {})
+        return manager_info.get("idValue")
+    return None
+
+
+def get_manager_dn(conn, ldap_search_base, manager_id):
+    """Lookup a manager's DN in AD by their employeeID."""
+    if not manager_id:
+        return None
+    conn.search(ldap_search_base,
+                f"(employeeID={manager_id})",
+                SUBTREE,
+                attributes=["distinguishedName"])
+    if conn.entries:
+        return conn.entries[0].distinguishedName.value
+    return None
+
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     """Create and enable an AD user using data from ADP."""
     country_code = extract_work_address_field(user_data, "countryCode") or ""
@@ -262,65 +296,43 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     hire_date = get_hire_date(user_data) or "<no hire date>"
 
     # Search the entire domain for the employeeID to prevent creating duplicates
-    conn.search(ldap_search_base, f"(employeeID={emp_id})", SUBTREE, attributes=["employeeID", "distinguishedName"])
+    conn.search(ldap_search_base,
+                f"(employeeID={emp_id})",
+                SUBTREE,
+                attributes=["employeeID", "distinguishedName"])
     if conn.entries:
         logging.info(f"User already exists: {emp_id} at {conn.entries[0].distinguishedName.value}")
+        # If user exists, update manager if needed
+        manager_id = extract_manager_id(user_data)
+        manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+        if manager_dn:
+            conn.modify(conn.entries[0].distinguishedName.value,
+                        {"manager": [(MODIFY_REPLACE, [manager_dn])]})
         return
 
-    first, last = get_first_last(person)
-    if not first:
-        # fallback to full_name parse if necessary (shouldn't happen)
-        parts = full_name.split()
-        first = parts[0] if parts else ""
-        last = parts[1] if len(parts) > 1 else ""
-    base_sam = sanitize_string_for_sam((first[0].lower() + last.lower()) if first and last else "")
-    
-    # Set the UPN to the internal domain and the email to the external domain
-    upn_suffix = "@us.corp.cfsbrands.com"
-    email_suffix = "@cfsbrands.com"
-    
-    base_upn = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{upn_suffix}" if first and last else "")
-    base_email = (f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{email_suffix}" if first and last else "")
-
-    # Uniqueness check for samAccountName and mail
-    sam = base_sam
-    upn = base_upn
-    email = base_email
-    count = 1
-    while True:
-        conn.search(ldap_search_base, f"(sAMAccountName={sam})", SUBTREE, attributes=["sAMAccountName"])
-        if not conn.entries:
-            break
-        count += 1
-        sam = f"{base_sam}{count}"
-        upn = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}{upn_suffix}"
-        email = f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}{count}{email_suffix}"
-
-    postal = extract_work_address_field(user_data, "postalCode")
-    state = extract_state_from_work(user_data)
-    street = extract_work_address_field(user_data, "lineOne")
-    city = extract_work_address_field(user_data, "cityName")
-    country_name = "United States" if country_code.upper() == "US" else country_code
-
+    # Build attributes for new user
+    base_sam = sanitize_string_for_sam(first[0].lower() + last.lower())
     attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
-        "cn": f"{first} {last}".strip(),
+        "cn": full_name,
         "givenName": first,
         "sn": last,
-        "displayName": f"{first} {last}".strip(),
-        "userPrincipalName": upn,
-        "mail": email,
-        "sAMAccountName": sam,
+        "displayName": full_name,
+        "userPrincipalName": f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@us.corp.cfsbrands.com",
+        "mail": f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com",
+        "sAMAccountName": base_sam,
         "employeeID": emp_id,
         "title": extract_assignment_field(user_data, "jobTitle"),
+        "businessTitle": extract_assignment_field(user_data, "businessTitle"),  # custom HR field
         "department": extract_department(user_data),
-        "l": city,
-        "postalCode": postal,
-        "st": state,
-        "streetAddress": street,
-        "co": country_name,
+        "l": extract_work_address_field(user_data, "cityName"),
+        "postalCode": extract_work_address_field(user_data, "postalCode"),
+        "st": extract_state_from_work(user_data),
+        "streetAddress": extract_work_address_field(user_data, "lineOne"),
+        "co": "United States" if country_code.upper() == "US" else country_code,
         "company": extract_company(user_data),
-        "userAccountControl": 514,
+        "manager": get_manager_dn(conn, ldap_search_base, extract_manager_id(user_data)),
+        "userAccountControl": get_user_account_control(user_data),
     }
 
     mandatory = {
@@ -334,14 +346,13 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         return
     logging.info(f"User created: {dn} (hireDate={hire_date})")
 
+    # Set password and enable account
     pwd = generate_password()
     try:
         conn.extend.microsoft.modify_password(dn, pwd)
-        logging.info(f"Password set for {dn}")
-        conn.modify(dn, {"pwdLastSet": [("MODIFY_REPLACE", [0])]})
-        logging.info(f"pwdLastSet reset for {dn}")
-        conn.modify(dn, {"userAccountControl": [("MODIFY_REPLACE", [512])]})
-        logging.info(f"Account enabled for {dn}")
+        conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
+        conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [512])]})
+        logging.info(f"Account enabled and password set for {dn}")
     except Exception as e:
         logging.error(f"Password or enable failed for {dn}: {e}")
 
