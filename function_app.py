@@ -190,6 +190,29 @@ def extract_state_from_work(emp):
             return cs.get("codeValue", "")
     return ""
 
+
+def extract_manager_id(emp):
+    """Return the ADP associateOID of the employee's manager."""
+    wa = emp.get("workAssignments", [])
+    if wa:
+        reports_to = wa[0].get("reportsTo", [{}])[0]
+        manager_info = reports_to.get("workerID", {})
+        return manager_info.get("idValue")
+    return None
+
+
+def get_manager_dn(conn, ldap_search_base, manager_id):
+    """Lookup a manager's DN in AD by their employeeID."""
+    if not manager_id:
+        return None
+    conn.search(ldap_search_base,
+                f"(employeeID={manager_id})",
+                SUBTREE,
+                attributes=["distinguishedName"])
+    if conn.entries:
+        return conn.entries[0].distinguishedName.value
+    return None
+
 def get_adp_employees(token):
     """Retrieve all employee records from ADP, handling pagination."""
     employees = []
@@ -216,9 +239,8 @@ def get_adp_employees(token):
             break
         offset += limit
     logging.info(f"Total records retrieved: {len(employees)}")
-    employees_with_hire_date = [emp for emp in employees if get_hire_date(emp)]
-    logging.info(f"Total employees with hire date: {len(employees_with_hire_date)}")
-    return employees_with_hire_date
+    return employees
+
 
 def get_status(emp):
     """Determine if an employee is Active or Inactive."""
@@ -239,9 +261,11 @@ def get_status(emp):
         t = t.replace(tzinfo=timezone.utc)
     return "Active" if t > now else "Inactive"
 
+
 def get_user_account_control(emp):
     """Map employee status to the userAccountControl flag."""
     return 512 if get_status(emp) == "Active" else 514
+
 
 def generate_password(length: int = 24) -> str:
     """Generate a random complex password of the given length."""
@@ -256,27 +280,6 @@ def generate_password(length: int = 24) -> str:
         ):
             return pwd
 
-def extract_manager_id(emp):
-    """Return the ADP associateOID of the employee's manager."""
-    wa = emp.get("workAssignments", [])
-    if wa:
-        rpt = wa[0].get("reportsTo", [{}])[0]
-        manager_info = rpt.get("workerID", {})
-        return manager_info.get("idValue")
-    return None
-
-
-def get_manager_dn(conn, ldap_search_base, manager_id):
-    """Lookup a manager's DN in AD by their employeeID."""
-    if not manager_id:
-        return None
-    conn.search(ldap_search_base,
-                f"(employeeID={manager_id})",
-                SUBTREE,
-                attributes=["distinguishedName"])
-    if conn.entries:
-        return conn.entries[0].distinguishedName.value
-    return None
 
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     """Create and enable an AD user using data from ADP."""
@@ -372,11 +375,14 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     if all_employees is None:
         logging.error("❌ get_adp_employees returned None")
         return
-    logging.info(f"ℹ️  Retrieved {len(all_employees)} total ADP employees")
+    
+    employees_with_hire_date = [emp for emp in all_employees if get_hire_date(emp)]
+    logging.info(f"ℹ️  Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
+    
     today = datetime.now(tz=timezone.utc).date()
     cutoff = today - timedelta(days=0)
     employees_recent = []
-    for emp in all_employees:
+    for emp in employees_with_hire_date:
         hire_str = get_hire_date(emp)
         if not hire_str:
             logging.debug(f"No hireDate for {extract_employee_id(emp)}; skipping")
@@ -479,4 +485,26 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         )
     return func.HttpResponse(
         json.dumps(out), mimetype="application/json", status_code=200
+    )
+
+# ---------------------------
+# Raw ADP Data Export Endpoint
+# ---------------------------
+@app.function_name(name="export_adp_data")
+@app.route(route="export", methods=["GET"])
+def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
+    """HTTP endpoint that returns a full JSON dump of all ADP employees."""
+    logging.info("ADP raw export triggered.")
+    token = get_adp_token()
+    if not token:
+        return func.HttpResponse("Failed to get ADP token.", status_code=500)
+    
+    employees = get_adp_employees(token)
+    if employees is None:
+        return func.HttpResponse("Failed to get ADP employees.", status_code=500)
+        
+    return func.HttpResponse(
+        json.dumps(employees, indent=2), # Use indent for readability
+        mimetype="application/json",
+        status_code=200
     )
