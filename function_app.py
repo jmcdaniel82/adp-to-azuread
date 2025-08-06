@@ -503,72 +503,90 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns a mapping of ADP departments to AD departments."""
+    """HTTP endpoint that returns a mapping of ADP departments to AD departments without timing out."""
     logging.info("ADP to AD department mapping export triggered.")
-    
-    # 1. Get ADP Token
+
+    # 1. Get ADP Token and employees list (paginated)
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Failed to get ADP token.", status_code=500)
 
-    # 2. Get all ADP employees
-    employees = get_adp_employees(token, paginate_all=True)
-    if employees is None:
+    adp_employees = get_adp_employees(token)  # full list
+    if adp_employees is None:
         return func.HttpResponse("Failed to get ADP employees.", status_code=500)
 
-    # 3. Connect to LDAP
+    # 2. Connect to LDAP once and retrieve all employeeID->department in one paged search
     ldap_server = os.getenv("LDAP_SERVER")
     ldap_user = os.getenv("LDAP_USER")
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
     ca_bundle = os.getenv("CA_BUNDLE_PATH")
-    
-    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base, ca_bundle]):
-         logging.error("Missing LDAP configuration variables for export.")
-         return func.HttpResponse("Missing LDAP configuration.", status_code=500)
 
-    tls_config = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
+    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base, ca_bundle]):
+        logging.error("Missing LDAP configuration variables for export.")
+        return func.HttpResponse("Missing LDAP configuration.", status_code=500)
+
+    tls_config = Tls(
+        ca_certs_file=ca_bundle,
+        validate=ssl.CERT_REQUIRED,
+        version=ssl.PROTOCOL_TLSv1_2,
+    )
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
-    
     try:
-        conn = Connection(server, user=ldap_user, password=ldap_password, authentication=NTLM, auto_bind=True)
+        conn = Connection(
+            server,
+            user=ldap_user,
+            password=ldap_password,
+            authentication=NTLM,
+            auto_bind=True,
+        )
         logging.info("🔗 LDAP connection opened for export.")
     except Exception as e:
         logging.error(f"❌ Failed to connect to LDAP server for export: {e}")
         return func.HttpResponse("LDAP connection failed.", status_code=500)
 
-    # 4. Create a set for unique pairings
-    department_map = set()
+    # 3. Fetch all AD users with employeeID and department in one operation
+    ldap_map = {}
+    page_size = 500
+    cookie = None
+    while True:
+        conn.search(
+            ldap_search_base,
+            '(employeeID=*)',
+            SUBTREE,
+            attributes=["employeeID", "department"],
+            paged_size=page_size,
+            paged_cookie=cookie,
+        )
+        for entry in conn.entries:
+            emp_id = entry.employeeID.value
+            dept = entry.department.value if entry.department else None
+            if emp_id and dept:
+                ldap_map[emp_id] = dept
 
-    # 5. Iterate and map
-    for emp in employees:
-        emp_id = extract_employee_id(emp)
-        if not emp_id:
+        cookie = conn.result.get('controls', {}).get('1.2.840.113556.1.4.319', {}).get('value', {}).get('cookie')
+        if not cookie:
+            break
+
+    # 4. Build department mapping by iterating ADP list
+    dept_pairs = set()
+    for emp in adp_employees:
+        adp_dept = extract_department(emp)
+        if not adp_dept:
             continue
-            
-        adp_department = extract_department(emp)
-        
-        conn.search(ldap_search_base, f"(employeeID={emp_id})", SUBTREE, attributes=["department"])
-        
-        if conn.entries:
-            ad_user = conn.entries[0]
-            ad_department = ad_user.department.value if ad_user.department else None
-            
-            # Add the pairing if both exist
-            if adp_department and ad_department:
-                department_map.add((adp_department, ad_department))
+        emp_id = extract_employee_id(emp)
+        ad_dept = ldap_map.get(emp_id)
+        if ad_dept:
+            dept_pairs.add((adp_dept, ad_dept))
 
-    # 6. Unbind LDAP
     conn.unbind()
     logging.info("🔒 LDAP connection closed for export.")
 
-    # 7. Format for JSON output
-    sorted_map = sorted(list(department_map))
-    output_list = [{"adpDepartment": adp, "adDepartment": ad} for adp, ad in sorted_map]
-
-    # 8. Return response
+    # 5. Return sorted JSON
+    sorted_map = sorted(dept_pairs)
+    output = [{"adpDepartment": a, "adDepartment": b} for a, b in sorted_map]
     return func.HttpResponse(
-        json.dumps(output_list, indent=2),
+        json.dumps(output, indent=2),
         mimetype="application/json",
         status_code=200
     )
