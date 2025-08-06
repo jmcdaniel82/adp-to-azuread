@@ -500,42 +500,32 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
 # ---------------------------
 # Raw ADP Data Export Endpoint
 # ---------------------------
-def json_converter(o):
-    """Convert non-serializable types to a string."""
-    if isinstance(o, (datetime, date)):
-        return o.isoformat()
-    return str(o)
-
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns a full JSON dump of all ADP employees."""
-    logging.info("ADP raw export triggered.")
+    """HTTP endpoint that returns a unique list of all department titles."""
+    logging.info("ADP department title export triggered.")
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Failed to get ADP token.", status_code=500)
-    
-    try:
-        page = int(req.params.get("page", 1))
-        page_size = int(req.params.get("pageSize", 100))
-    except ValueError:
-        return func.HttpResponse("Invalid page or pageSize.", status_code=400)
-        
-    offset = (page - 1) * page_size
-    
-    employees = get_adp_employees(token, limit=page_size, offset=offset, paginate_all=False)
-    
+
+    # Get all employees, ensuring full pagination
+    employees = get_adp_employees(token, paginate_all=True)
+
     if employees is None:
         return func.HttpResponse("Failed to get ADP employees.", status_code=500)
-    
-    response_data = {
-        "page": page,
-        "pageSize": page_size,
-        "workers": employees
-    }
-        
+
+    department_titles = set()
+    for emp in employees:
+        department = extract_department(emp)
+        if department:  # Add to set only if a department is found
+            department_titles.add(department)
+
+    # Convert set to a sorted list for consistent output
+    sorted_departments = sorted(list(department_titles))
+
     return func.HttpResponse(
-        json.dumps(response_data, indent=2, default=json_converter),
+        json.dumps(sorted_departments, indent=2),
         mimetype="application/json",
         status_code=200
     )
