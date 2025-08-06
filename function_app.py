@@ -9,7 +9,7 @@ import string
 import azure.functions as func
 from ldap3 import Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 app = func.FunctionApp()
 
@@ -213,16 +213,17 @@ def get_manager_dn(conn, ldap_search_base, manager_id):
         return conn.entries[0].distinguishedName.value
     return None
 
-def get_adp_employees(token):
-    """Retrieve all employee records from ADP, handling pagination."""
+def get_adp_employees(token, limit=50, offset=0, paginate_all=True):
+    """Retrieve employee records from ADP, handling pagination."""
     employees = []
-    limit = 50
-    offset = 0
     base_url = os.getenv("ADP_EMPLOYEE_URL")
     cert = (os.getenv("ADP_CERT_PEM"), os.getenv("ADP_CERT_KEY"))
     headers = {"Authorization": f"Bearer {token}"}
+    
+    current_offset = offset
+    
     while True:
-        url = f"{base_url}?limit={limit}&offset={offset}"
+        url = f"{base_url}?$top={limit}&$skip={current_offset}"
         try:
             response = requests.get(url, headers=headers, cert=cert, timeout=10)
         except requests.RequestException as e:
@@ -231,14 +232,23 @@ def get_adp_employees(token):
         if not response.ok:
             logging.error(f"Failed to retrieve employees: {response.text}")
             break
-        data = response.json()
+        
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            logging.error(f"Failed to decode JSON from ADP response: {response.text}")
+            break
+
         page_employees = data.get("workers", [])
         employees.extend(page_employees)
         logging.info(f"Records retrieved so far: {len(employees)}")
-        if len(page_employees) < limit:
+        
+        if not paginate_all or len(page_employees) < limit:
             break
-        offset += limit
-    logging.info(f"Total records retrieved: {len(employees)}")
+        
+        current_offset += limit
+        
+    logging.info(f"Total records retrieved in this call: {len(employees)}")
     return employees
 
 
@@ -490,6 +500,12 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
 # ---------------------------
 # Raw ADP Data Export Endpoint
 # ---------------------------
+def json_converter(o):
+    """Convert non-serializable types to a string."""
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
+
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
@@ -519,7 +535,7 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     }
         
     return func.HttpResponse(
-        json.dumps(response_data, indent=2), # Use indent for readability
+        json.dumps(response_data, indent=2, default=json_converter),
         mimetype="application/json",
         status_code=200
     )
