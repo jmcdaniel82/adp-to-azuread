@@ -499,12 +499,27 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     if not token:
         return func.HttpResponse("Failed to get ADP token.", status_code=500)
     
-    employees = get_adp_employees(token)
+    try:
+        page = int(req.params.get("page", 1))
+        page_size = int(req.params.get("pageSize", 100))
+    except ValueError:
+        return func.HttpResponse("Invalid page or pageSize.", status_code=400)
+        
+    offset = (page - 1) * page_size
+    
+    employees = get_adp_employees(token, limit=page_size, offset=offset, paginate_all=False)
+    
     if employees is None:
         return func.HttpResponse("Failed to get ADP employees.", status_code=500)
+    
+    response_data = {
+        "page": page,
+        "pageSize": page_size,
+        "workers": employees
+    }
         
     return func.HttpResponse(
-        json.dumps(employees, indent=2), # Use indent for readability
+        json.dumps(response_data, indent=2), # Use indent for readability
         mimetype="application/json",
         status_code=200
     )
