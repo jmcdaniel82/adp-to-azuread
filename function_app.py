@@ -10,6 +10,7 @@ import azure.functions as func
 from ldap3 import Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta, date
+from concurrent.futures import ThreadPoolExecutor
 
 app = func.FunctionApp()
 
