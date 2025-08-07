@@ -507,8 +507,19 @@ def json_converter(o):
         return o.isoformat()
     return str(o)
 
-def fetch_ad_data_task():
-    """Task to fetch all users and their departments from Active Directory."""
+
+def normalize_id(emp_id: str) -> str:
+    """Trim whitespace and uppercase employee IDs."""
+    return emp_id.strip().upper() if emp_id else ""
+
+
+def normalize_dept(dept: str) -> str:
+    """Lowercase, strip, and remove non-alphanumeric characters."""
+    return ''.join(c for c in dept.lower().strip() if c.isalnum() or c.isspace())
+
+
+def fetch_ad_data_task() -> dict:
+    """Fetch all AD users and build a map of employeeID -> department."""
     ldap_server = os.getenv("LDAP_SERVER")
     ldap_user = os.getenv("LDAP_USER")
     ldap_password = os.getenv("LDAP_PASSWORD")
@@ -517,17 +528,17 @@ def fetch_ad_data_task():
 
     if not all([ldap_server, ldap_user, ldap_password, ldap_search_base, ca_bundle]):
         logging.error("Missing LDAP configuration for export.")
-        return None
-    
-    tls_config = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
-    server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
-    
+        return {}
+
+    tls = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
+    server = Server(ldap_server, port=636, use_ssl=True, tls=tls, get_info=None)
     try:
-        conn = Connection(server, user=ldap_user, password=ldap_password, authentication=NTLM, auto_bind=True)
+        conn = Connection(server, user=ldap_user, password=ldap_password,
+                          authentication=NTLM, auto_bind=True)
         logging.info("🔗 LDAP connection opened for export.")
     except Exception as e:
-        logging.error(f"❌ Failed to connect to LDAP server for export: {e}")
-        return None
+        logging.error(f"Failed to connect to LDAP: {e}")
+        return {}
 
     ldap_map = {}
     page_size = 500
@@ -543,56 +554,83 @@ def fetch_ad_data_task():
                 paged_cookie=cookie,
             )
             for entry in conn.entries:
-                emp_id = entry.employeeID.value
-                dept = entry.department.value if entry.department else None
+                raw_id = entry.employeeID.value
+                raw_dept = entry.department.value if entry.department else None
+                emp_id = normalize_id(raw_id)
+                dept = normalize_dept(raw_dept) if raw_dept else None
                 if emp_id and dept:
                     ldap_map[emp_id] = dept
-            
-            cookie = conn.result.get('controls', {}).get('1.2.840.113556.1.4.319', {}).get('value', {}).get('cookie')
+
+            controls = conn.result.get('controls', {})
+            cookie = controls.get('1.2.840.113556.1.4.319', {})\
+                            .get('value', {})\
+                            .get('cookie')
             if not cookie:
                 break
     finally:
         conn.unbind()
         logging.info("🔒 LDAP connection closed for export.")
-        
+
     return ldap_map
 
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns a mapping of ADP departments to AD departments without timing out."""
-    logging.info("ADP to AD department mapping export triggered.")
-    
+    """Return both department pairs and diagnostic sets to debug mappings."""
+    logging.info("Export triggered: building dept mappings and diagnostics.")
+
     token = get_adp_token()
     if not token:
-        return func.HttpResponse("Failed to get ADP token.", status_code=500)
+        return func.HttpResponse("ADP token retrieval failed.", status_code=500)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        adp_future = executor.submit(get_adp_employees, token)
-        ad_future = executor.submit(fetch_ad_data_task)
-        
-        adp_employees = adp_future.result()
-        ldap_map = ad_future.result()
+    # Parallel fetch of ADP and AD data
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        future_adp = ex.submit(get_adp_employees, token)
+        future_ldap = ex.submit(fetch_ad_data_task)
+        adp_employees = future_adp.result()
+        ldap_map = future_ldap.result()
 
     if adp_employees is None or ldap_map is None:
-        return func.HttpResponse("Failed to fetch data from ADP or AD.", status_code=500)
-        
-    # Build department mapping
+        return func.HttpResponse("Data fetch error (ADP or AD).", status_code=500)
+
+    # Inventory exports
+    adp_depts = {normalize_dept(extract_department(emp)) for emp in adp_employees if extract_department(emp)}
+    ad_depts = set(ldap_map.values())
+    ids_adp = {normalize_id(extract_employee_id(emp)) for emp in adp_employees if extract_employee_id(emp)}
+    ids_ad = set(ldap_map.keys())
+    missing_in_ad = sorted(ids_adp - ids_ad)
+    missing_in_adp = sorted(ids_ad - ids_adp)
+
+    # Build dept pairs with detailed logging
     dept_pairs = set()
     for emp in adp_employees:
-        adp_dept = extract_department(emp)
-        if not adp_dept:
+        raw_id = extract_employee_id(emp)
+        emp_id = normalize_id(raw_id)
+        if not emp_id:
+            logging.debug(f"Skipping ADP record with no ID: {raw_id}")
             continue
-        emp_id = extract_employee_id(emp)
+        raw_adp_dept = extract_department(emp)
+        adp_dept = normalize_dept(raw_adp_dept)
+        if not adp_dept:
+            logging.debug(f"ADP missing department for ID {emp_id}")
+            continue
         ad_dept = ldap_map.get(emp_id)
-        if ad_dept:
-            dept_pairs.add((adp_dept, ad_dept))
+        if not ad_dept:
+            logging.debug(f"No AD entry for ID {emp_id} (ADP dept '{adp_dept}')")
+            continue
+        dept_pairs.add((adp_dept, ad_dept))
 
-    # Return sorted JSON
-    sorted_map = sorted(dept_pairs)
-    output = [{"adpDepartment": a, "adDepartment": b} for a, b in sorted_map]
+    # Prepare JSON payload
+    result = {
+        "pairs": sorted(dept_pairs),
+        "adpDepartments": sorted(adp_depts),
+        "adDepartments": sorted(ad_depts),
+        "adpOnlyIDs": missing_in_ad,
+        "adOnlyIDs": missing_in_adp
+    }
+
     return func.HttpResponse(
-        json.dumps(output, indent=2),
+        json.dumps(result, default=json_converter, indent=2),
         mimetype="application/json",
         status_code=200
     )
