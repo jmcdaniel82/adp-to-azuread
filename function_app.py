@@ -502,21 +502,18 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
 # Department Mapping Export Endpoint
 # ---------------------------
 def json_converter(o):
-    """Convert non-serializable types to a string."""
+    """Convert non-serializable types to a JSON-friendly format."""
     if isinstance(o, (datetime, date)):
         return o.isoformat()
     return str(o)
-
 
 def normalize_id(emp_id: str) -> str:
     """Trim whitespace and uppercase employee IDs."""
     return emp_id.strip().upper() if emp_id else ""
 
-
 def normalize_dept(dept: str) -> str:
     """Lowercase, strip, and remove non-alphanumeric characters."""
     return ''.join(c for c in dept.lower().strip() if c.isalnum() or c.isspace())
-
 
 def fetch_ad_data_task() -> dict:
     """Fetch all AD users and build a map of employeeID -> department."""
@@ -554,17 +551,15 @@ def fetch_ad_data_task() -> dict:
                 paged_cookie=cookie,
             )
             for entry in conn.entries:
-                raw_id = entry.employeeID.value
-                raw_dept = entry.department.value if entry.department else None
-                emp_id = normalize_id(raw_id)
-                dept = normalize_dept(raw_dept) if raw_dept else None
+                emp_id = normalize_id(entry.employeeID.value)
+                dept = normalize_dept(entry.department.value) if entry.department else None
                 if emp_id and dept:
                     ldap_map[emp_id] = dept
 
             controls = conn.result.get('controls', {})
             cookie = controls.get('1.2.840.113556.1.4.319', {})\
-                            .get('value', {})\
-                            .get('cookie')
+                                .get('value', {})\
+                                .get('cookie')
             if not cookie:
                 break
     finally:
@@ -576,24 +571,24 @@ def fetch_ad_data_task() -> dict:
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """Return both department pairs and diagnostic sets to debug mappings."""
-    logging.info("Export triggered: building dept mappings and diagnostics.")
+    """Return department mapping pairs and diagnostics for debugging."""
+    logging.info("📥 Export triggered: fetching ADP and AD data in parallel.")
 
     token = get_adp_token()
     if not token:
-        return func.HttpResponse("ADP token retrieval failed.", status_code=500)
+        return func.HttpResponse("❌ ADP token retrieval failed.", status_code=500)
 
-    # Parallel fetch of ADP and AD data
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        future_adp = ex.submit(get_adp_employees, token)
-        future_ldap = ex.submit(fetch_ad_data_task)
+    # Parallel fetch
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_adp = executor.submit(get_adp_employees, token)
+        future_ldap = executor.submit(fetch_ad_data_task)
         adp_employees = future_adp.result()
         ldap_map = future_ldap.result()
 
     if adp_employees is None or ldap_map is None:
-        return func.HttpResponse("Data fetch error (ADP or AD).", status_code=500)
+        return func.HttpResponse("❌ Data fetch error (ADP or AD).", status_code=500)
 
-    # Inventory exports
+    # Inventory: extract unique sets
     adp_depts = {normalize_dept(extract_department(emp)) for emp in adp_employees if extract_department(emp)}
     ad_depts = set(ldap_map.values())
     ids_adp = {normalize_id(extract_employee_id(emp)) for emp in adp_employees if extract_employee_id(emp)}
@@ -601,26 +596,25 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     missing_in_ad = sorted(ids_adp - ids_ad)
     missing_in_adp = sorted(ids_ad - ids_adp)
 
-    # Build dept pairs with detailed logging
+    # Build mapping pairs with logging
     dept_pairs = set()
     for emp in adp_employees:
-        raw_id = extract_employee_id(emp)
-        emp_id = normalize_id(raw_id)
+        emp_id = normalize_id(extract_employee_id(emp))
         if not emp_id:
-            logging.debug(f"Skipping ADP record with no ID: {raw_id}")
+            logging.debug(f"Skipping record with empty ID: {emp}")
             continue
-        raw_adp_dept = extract_department(emp)
-        adp_dept = normalize_dept(raw_adp_dept)
+        raw_dept = extract_department(emp)
+        adp_dept = normalize_dept(raw_dept)
         if not adp_dept:
-            logging.debug(f"ADP missing department for ID {emp_id}")
+            logging.debug(f"No ADP dept for ID {emp_id}")
             continue
         ad_dept = ldap_map.get(emp_id)
         if not ad_dept:
-            logging.debug(f"No AD entry for ID {emp_id} (ADP dept '{adp_dept}')")
+            logging.debug(f"No AD record for ID {emp_id} (ADP dept: '{adp_dept}')")
             continue
         dept_pairs.add((adp_dept, ad_dept))
 
-    # Prepare JSON payload
+    # Assemble final JSON
     result = {
         "pairs": sorted(dept_pairs),
         "adpDepartments": sorted(adp_depts),
