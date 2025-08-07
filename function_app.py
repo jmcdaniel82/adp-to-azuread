@@ -497,6 +497,97 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
         json.dumps(out), mimetype="application/json", status_code=200
     )
 
+# ---------------------------
+# Department Mapping Export Endpoint
+# ---------------------------
+def json_converter(o):
+    """Convert non-serializable types to a string."""
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
+
+def fetch_adp_chunk(token, start_offset, num_records):
+    """Fetches a chunk of employee records from ADP."""
+    employees = []
+    page_size = 50  # Max records per ADP API call
+    fetched_count = 0
+    current_offset = start_offset
+
+    while fetched_count < num_records:
+        remaining = num_records - fetched_count
+        fetch_size = min(page_size, remaining)
+        
+        url = f"{os.getenv('ADP_EMPLOYEE_URL')}?$top={fetch_size}&$skip={current_offset}"
+        
+        try:
+            response = requests.get(url, headers={"Authorization": f"Bearer {token}"}, cert=(os.getenv("ADP_CERT_PEM"), os.getenv("ADP_CERT_KEY")), timeout=10)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            logging.error(f"Failed to retrieve ADP chunk at offset {current_offset}: {e}")
+            return None
+
+        page_employees = data.get("workers", [])
+        if not page_employees:
+            break  # No more records from ADP
+
+        employees.extend(page_employees)
+        fetched_count += len(page_employees)
+        current_offset += len(page_employees)
+        
+    logging.info(f"Fetched chunk of {len(employees)} records from offset {start_offset}.")
+    return employees
+
+def fetch_ad_data_task():
+    """Task to fetch all users and their departments from Active Directory."""
+    ldap_server = os.getenv("LDAP_SERVER")
+    ldap_user = os.getenv("LDAP_USER")
+    ldap_password = os.getenv("LDAP_PASSWORD")
+    ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
+    ca_bundle = os.getenv("CA_BUNDLE_PATH")
+
+    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base, ca_bundle]):
+        logging.error("Missing LDAP configuration for export.")
+        return None
+    
+    tls_config = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
+    server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
+    
+    try:
+        conn = Connection(server, user=ldap_user, password=ldap_password, authentication=NTLM, auto_bind=True)
+        logging.info("🔗 LDAP connection opened for export.")
+    except Exception as e:
+        logging.error(f"❌ Failed to connect to LDAP server for export: {e}")
+        return None
+
+    ldap_map = {}
+    page_size = 500
+    cookie = None
+    try:
+        while True:
+            conn.search(
+                ldap_search_base,
+                '(employeeID=*)',
+                SUBTREE,
+                attributes=["employeeID", "department"],
+                paged_size=page_size,
+                paged_cookie=cookie,
+            )
+            for entry in conn.entries:
+                emp_id = entry.employeeID.value
+                dept = entry.department.value if entry.department else None
+                if emp_id and dept:
+                    ldap_map[emp_id] = dept
+            
+            cookie = conn.result.get('controls', {}).get('1.2.840.113556.1.4.319', {}).get('value', {}).get('cookie')
+            if not cookie:
+                break
+    finally:
+        conn.unbind()
+        logging.info("🔒 LDAP connection closed for export.")
+        
+    return ldap_map
+
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
