@@ -507,38 +507,6 @@ def json_converter(o):
         return o.isoformat()
     return str(o)
 
-def fetch_adp_chunk(token, start_offset, num_records):
-    """Fetches a chunk of employee records from ADP."""
-    employees = []
-    page_size = 50  # Max records per ADP API call
-    fetched_count = 0
-    current_offset = start_offset
-
-    while fetched_count < num_records:
-        remaining = num_records - fetched_count
-        fetch_size = min(page_size, remaining)
-        
-        url = f"{os.getenv('ADP_EMPLOYEE_URL')}?$top={fetch_size}&$skip={current_offset}"
-        
-        try:
-            response = requests.get(url, headers={"Authorization": f"Bearer {token}"}, cert=(os.getenv("ADP_CERT_PEM"), os.getenv("ADP_CERT_KEY")), timeout=10)
-            response.raise_for_status()
-            data = response.json()
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logging.error(f"Failed to retrieve ADP chunk at offset {current_offset}: {e}")
-            return None
-
-        page_employees = data.get("workers", [])
-        if not page_employees:
-            break  # No more records from ADP
-
-        employees.extend(page_employees)
-        fetched_count += len(page_employees)
-        current_offset += len(page_employees)
-        
-    logging.info(f"Fetched chunk of {len(employees)} records from offset {start_offset}.")
-    return employees
-
 def fetch_ad_data_task():
     """Task to fetch all users and their departments from Active Directory."""
     ldap_server = os.getenv("LDAP_SERVER")
@@ -599,28 +567,19 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     if not token:
         return func.HttpResponse("Failed to get ADP token.", status_code=500)
 
-    all_adp_employees = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        # Assuming ~4000 employees, create 4 chunks of 1000
-        chunk_offsets = [0, 1000, 2000, 3000]
-        adp_futures = [executor.submit(fetch_adp_chunk, token, offset, 1000) for offset in chunk_offsets]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        adp_future = executor.submit(get_adp_employees, token)
         ad_future = executor.submit(fetch_ad_data_task)
         
-        # Collect ADP results
-        for future in adp_futures:
-            chunk = future.result()
-            if chunk:
-                all_adp_employees.extend(chunk)
-        
-        # Collect AD result
+        adp_employees = adp_future.result()
         ldap_map = ad_future.result()
 
-    if not all_adp_employees or ldap_map is None:
+    if adp_employees is None or ldap_map is None:
         return func.HttpResponse("Failed to fetch data from ADP or AD.", status_code=500)
         
     # Build department mapping
     dept_pairs = set()
-    for emp in all_adp_employees:
+    for emp in adp_employees:
         adp_dept = extract_department(emp)
         if not adp_dept:
             continue
