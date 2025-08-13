@@ -148,6 +148,13 @@ def extract_department(emp):
             return ou.get("nameCode", {}).get("shortName", "")
     return ""
 
+def extract_business_title(emp):
+    """Extracts the Business Title from the customFieldGroup."""
+    custom_fields = emp.get("customFieldGroup", {}).get("stringFields", [])
+    for field in custom_fields:
+        if field.get("nameCode", {}).get("codeValue") == "Business Title":
+            return field.get("stringValue")
+    return None
 
 def extract_company(emp):
     """Retrieve the company or business unit name from work assignments."""
@@ -336,8 +343,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         "mail": f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com",
         "sAMAccountName": base_sam,
         "employeeID": emp_id,
-        "title": extract_assignment_field(user_data, "jobTitle"),
-        "businessTitle": extract_assignment_field(user_data, "businessTitle"),  # custom HR field
+        "title": extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle"),
         "department": extract_department(user_data),
         "l": extract_work_address_field(user_data, "cityName"),
         "postalCode": extract_work_address_field(user_data, "postalCode"),
@@ -486,7 +492,7 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
                 "employeeId": extract_employee_id(emp),
                 "givenName": first,
                 "familyName": last,
-                "jobTitle": extract_assignment_field(emp, "jobTitle"),
+                "jobTitle": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
                 "company": extract_company(emp),
                 "department": extract_department(emp),
                 "hireDate": get_hire_date(emp),
