@@ -1,6 +1,6 @@
 # Core HTTP, OAuth and Azure SDKs
 requests==2.32.4                     # HTTP client
-msal==1.32.3                         # ADAL/Msal OAuth2 flows
+msal==1.33.0                         # ADAL/Msal OAuth2 flows
 azure-functions==1.22.1              # Azure Functions Python worker SDK
 azure-functions-devops-build         # (if you use DevOps build tasks)
 azure-identity==1.16.1               # Managed identity & credential libraries
