@@ -6,7 +6,7 @@ azure-functions-devops-build         # (if you use DevOps build tasks)
 azure-identity==1.16.1               # Managed identity & credential libraries
 azure-keyvault-certificates==4.9.0   # Key Vault certificate retrieval
 azure-keyvault-secrets==4.9.0        # Key Vault secret retrieval
-azure-keyvault-keys==4.7.0           # Key Vault key operations
+azure-keyvault-keys==4.11.0           # Key Vault key operations
 azure-storage-blob==12.25.1          # Blob storage SDK
 
 # LDAP + LDAPS + NTLM/Kerberos
