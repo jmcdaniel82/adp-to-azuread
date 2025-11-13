@@ -12,7 +12,74 @@ from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor
 
+# Additional imports for certificate handling
+import tempfile
+import base64
+from typing import Optional
+
 app = func.FunctionApp()
+
+# ---- Helper functions ----
+
+# New helper to handle certificate values from environment variables. This allows
+# the application to work correctly both in local development (where
+# ADP_CERT_PEM and ADP_CERT_KEY refer to paths on disk) and in Azure (where
+# environment variables may contain PEM text or base64-encoded content from
+# Key Vault). The helper returns a filesystem path pointing to the proper
+# certificate data, writing a temporary file if necessary.
+def ensure_file_from_env(env_name: str, suffix: str) -> Optional[str]:
+    """
+    Resolve the certificate or key provided via environment variable.
+
+    - If the environment variable points to an existing file on disk, return
+      that path unchanged (useful for local development).
+    - If the environment variable contains PEM text (detected by the
+      '-----BEGIN ' prefix), write the text to a temporary file and return
+      its path.
+    - If the environment variable contains base64-encoded content (such as a
+      PFX/PKCS#12), decode it and write it to a temporary file, returning the
+      path.
+    - Otherwise, return None. The caller can decide how to handle missing or
+      unrecognized values.
+    """
+    value = os.getenv(env_name)
+    if not value:
+        return None
+
+    # If it's already a path on disk, use it directly.
+    if os.path.exists(value):
+        return value
+
+    # Normalize escaped newlines that may appear when secrets are stored with
+    # literal '\n' sequences (e.g., in Azure App Settings or Key Vault)
+    normalized = value.replace('\\n', '\n')
+
+    # Detect PEM text by the BEGIN header
+    if normalized.strip().startswith('-----BEGIN '):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(normalized.encode('utf-8'))
+        tmp.close()
+        # Log only the fact that a temp file was created; avoid revealing
+        # sensitive data
+        logging.info(f"{env_name} appears to be PEM text; wrote to temp file {tmp.name}")
+        return tmp.name
+
+    # Attempt to decode base64 content (commonly used for PFX)
+    try:
+        decoded = base64.b64decode(normalized)
+        if decoded:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.write(decoded)
+            tmp.close()
+            logging.info(f"{env_name} appears to be base64-encoded; wrote decoded bytes to temp file {tmp.name}")
+            return tmp.name
+    except Exception:
+        # If decoding fails, fall through to returning None
+        pass
+
+    # Value is not a file path, PEM, or base64-encoded; return None
+    logging.debug(f"{env_name} is not a valid file path, PEM, or base64 string.")
+    return None
 
 # ---- Helper functions ----
 
@@ -21,11 +88,28 @@ def get_adp_token():
     token_url = os.getenv("ADP_TOKEN_URL")
     client_id = os.getenv("ADP_CLIENT_ID")
     client_secret = os.getenv("ADP_CLIENT_SECRET")
-    cert_pem = os.getenv("ADP_CERT_PEM")
-    cert_key = os.getenv("ADP_CERT_KEY")
-    if not all([token_url, client_id, client_secret, cert_pem, cert_key]):
-        logging.error("Missing ADP configuration variables.")
+
+    # Check that base values are present
+    if not all([token_url, client_id, client_secret]):
+        logging.error("Missing ADP configuration variables (token URL or client credentials).")
         return None
+
+    # Resolve certificate file paths from environment variables. This helper
+    # handles both local paths and Key Vault secrets containing PEM/base64.
+    pem_path = ensure_file_from_env("ADP_CERT_PEM", ".pem")
+    key_path = ensure_file_from_env("ADP_CERT_KEY", ".key")
+
+    if not pem_path and not key_path:
+        logging.error("Missing client certificate/key for ADP mutual TLS.")
+        return None
+
+    # Determine the correct cert argument for requests. If both cert and key
+    # are available, pass them as a tuple; otherwise, pass just the cert file.
+    if pem_path and key_path:
+        cert_arg = (pem_path, key_path)
+    else:
+        cert_arg = pem_path
+
     payload = {
         "grant_type": "client_credentials",
         "client_id": client_id,
@@ -37,12 +121,14 @@ def get_adp_token():
             token_url,
             headers=headers,
             data=payload,
-            cert=(cert_pem, cert_key),
+            cert=cert_arg,
             timeout=10,
+            verify=os.getenv('CA_BUNDLE_PATH', True)
         )
         resp.raise_for_status()
         return resp.json().get("access_token")
     except Exception as e:
+        # Only log the exception message; avoid including sensitive data
         logging.error(f"ADP token retrieval failed: {e}")
         return None
 
@@ -225,7 +311,17 @@ def get_adp_employees(token, limit=50, offset=0, paginate_all=True):
     """Retrieve employee records from ADP, handling pagination."""
     employees = []
     base_url = os.getenv("ADP_EMPLOYEE_URL")
-    cert = (os.getenv("ADP_CERT_PEM"), os.getenv("ADP_CERT_KEY"))
+
+    # Resolve certificate paths using helper to handle PEM/base64 secrets or local paths
+    pem_path = ensure_file_from_env("ADP_CERT_PEM", ".pem")
+    key_path = ensure_file_from_env("ADP_CERT_KEY", ".key")
+    cert = None
+    if pem_path and key_path:
+        cert = (pem_path, key_path)
+    elif pem_path:
+        cert = pem_path
+    # If neither path is resolved, cert remains None; requests will not use client cert
+
     headers = {"Authorization": f"Bearer {token}"}
     
     current_offset = offset
@@ -233,7 +329,13 @@ def get_adp_employees(token, limit=50, offset=0, paginate_all=True):
     while True:
         url = f"{base_url}?$top={limit}&$skip={current_offset}"
         try:
-            response = requests.get(url, headers=headers, cert=cert, timeout=10)
+            response = requests.get(
+                url,
+                headers=headers,
+                cert=cert,
+                timeout=10,
+                verify=os.getenv('CA_BUNDLE_PATH', True)
+            )
         except requests.RequestException as e:
             logging.error(f"Failed to retrieve employees: {e}")
             return None
