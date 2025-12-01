@@ -548,15 +548,20 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
     ldap_create_base = os.getenv("LDAP_CREATE_BASE")
-    ca_bundle = os.getenv("CA_BUNDLE_PATH")
-    logging.info(f"Loading CA bundle from '{ca_bundle}'")
+
+    ca_bundle = get_ca_bundle()
+    logging.info(f"Using CA bundle at '{ca_bundle}' for LDAP")
+
     if not os.path.isfile(ca_bundle):
         logging.error(f"CA bundle not found at {ca_bundle}")
+        return
+
     tls_config = Tls(
         ca_certs_file=ca_bundle,
         validate=ssl.CERT_REQUIRED,
         version=ssl.PROTOCOL_TLSv1_2,
     )
+
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
         conn = Connection(
@@ -655,30 +660,46 @@ def fetch_ad_data_task() -> dict:
     ldap_user = os.getenv("LDAP_USER")
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
-    ca_bundle = os.getenv("CA_BUNDLE_PATH")
 
-    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base, ca_bundle]):
+    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base]):
         logging.error("Missing LDAP configuration for export.")
         return {}
 
-    tls = Tls(ca_certs_file=ca_bundle, validate=ssl.CERT_REQUIRED, version=ssl.PROTOCOL_TLSv1_2)
+    try:
+        ca_bundle = get_ca_bundle()
+        logging.info(f"🔐 Using CA bundle for export: {ca_bundle}")
+    except Exception as e:
+        logging.error(f"❌ Unable to determine CA bundle for export: {e}")
+        return {}
+
+    tls = Tls(
+        ca_certs_file=ca_bundle,
+        validate=ssl.CERT_REQUIRED,
+        version=ssl.PROTOCOL_TLS_CLIENT,
+    )
+
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls, get_info=None)
     try:
-        conn = Connection(server, user=ldap_user, password=ldap_password,
-                          authentication=NTLM, auto_bind=True)
+        conn = Connection(
+            server,
+            user=ldap_user,
+            password=ldap_password,
+            authentication=NTLM,
+            auto_bind=True,
+        )
         logging.info("🔗 LDAP connection opened for export.")
     except Exception as e:
         logging.error(f"Failed to connect to LDAP: {e}")
         return {}
 
-    ldap_map = {}
+    ldap_map: dict[str, str] = {}
     page_size = 500
     cookie = None
     try:
         while True:
             conn.search(
                 ldap_search_base,
-                '(employeeID=*)',
+                "(employeeID=*)",
                 SUBTREE,
                 attributes=["employeeID", "department"],
                 paged_size=page_size,
@@ -692,10 +713,12 @@ def fetch_ad_data_task() -> dict:
                 if emp_id and dept:
                     ldap_map[emp_id] = dept
 
-            controls = conn.result.get('controls', {})
-            cookie = controls.get('1.2.840.113556.1.4.319', {})\
-                             .get('value', {})\
-                             .get('cookie')
+            controls = conn.result.get("controls", {})
+            cookie = (
+                controls.get("1.2.840.113556.1.4.319", {})
+                .get("value", {})
+                .get("cookie")
+            )
             if not cookie:
                 break
     finally:
@@ -703,6 +726,7 @@ def fetch_ad_data_task() -> dict:
         logging.info("🔒 LDAP connection closed for export.")
 
     return ldap_map
+
 
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
