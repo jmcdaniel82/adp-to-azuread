@@ -673,9 +673,9 @@ def fetch_ad_data_task() -> dict:
         return {}
 
     tls = Tls(
-        ca_certs_file=ca_bundle,
-        validate=ssl.CERT_REQUIRED,
-        version=ssl.PROTOCOL_TLS_CLIENT,
+    validate=ssl.CERT_REQUIRED,
+    version=ssl.PROTOCOL_TLS_CLIENT,
+    ca_certs_file=os.getenv("CA_BUNDLE_PATH")
     )
 
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls, get_info=None)
