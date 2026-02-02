@@ -48,7 +48,7 @@ streetAddress
 
 title
 
-userPrincipalName (same as mail)
+userPrincipalName (uses UPN_SUFFIX, defaults to cfsbrands.com)
 
 Configuration (Environment Variables)
 
@@ -81,6 +81,8 @@ LDAP_SEARCH_BASE
 LDAP_CREATE_BASE
 
 CA_BUNDLE_PATH
+
+UPN_SUFFIX
 
 Azure Function Endpoints
 

@@ -490,6 +490,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     base_alias = sanitize_string_for_sam(first.lower()) + sanitize_string_for_sam(last.lower())
     if not base_alias:
         base_alias = base_sam_raw
+    upn_suffix = os.getenv("UPN_SUFFIX", "cfsbrands.com").strip()
+    if upn_suffix.startswith("@"):
+        upn_suffix = upn_suffix[1:]
 
     def build_sam(suffix: str) -> str:
         if not suffix:
@@ -538,7 +541,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             {
                 "cn": cn,
                 "displayName": cn,
-                "userPrincipalName": f"{alias}@us.corp.cfsbrands.com",
+                "userPrincipalName": f"{alias}@{upn_suffix}",
                 "mail": f"{alias}@cfsbrands.com",
                 "sAMAccountName": sam,
             }
