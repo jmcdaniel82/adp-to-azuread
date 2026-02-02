@@ -49,6 +49,7 @@ from function_app import (
     provision_user_in_ad,
     extract_work_address_field,
     extract_state_from_work,
+    get_adp_ca_bundle,
 )
 
 
@@ -186,4 +187,11 @@ def test_extract_state_from_work_falls_back_to_home():
         ]
     }
     assert extract_state_from_work(emp) == "NC"
+
+
+def test_get_adp_ca_bundle_prefers_certifi(tmp_path, monkeypatch):
+    fake_path = tmp_path / "adp-ca.pem"
+    fake_path.write_text("dummy", encoding="utf-8")
+    monkeypatch.setenv("ADP_CA_BUNDLE_PATH", str(fake_path))
+    assert get_adp_ca_bundle() == str(fake_path)
 

@@ -83,6 +83,18 @@ def get_ca_bundle() -> str:
     # Fall back to certifi's CA bundle
     return certifi.where()
 
+def get_adp_ca_bundle() -> str:
+    """
+    Determine the CA bundle path to use for verifying TLS connections to ADP.
+
+    - If ADP_CA_BUNDLE_PATH points to an existing file, return it.
+    - Otherwise, return certifi.where() for public CAs.
+    """
+    adp_ca_path = os.getenv('ADP_CA_BUNDLE_PATH')
+    if adp_ca_path and os.path.exists(adp_ca_path):
+        return adp_ca_path
+    return certifi.where()
+
 # ---- Helper functions ----
 
 def parse_datetime(value: str, context: str) -> Optional[datetime]:
@@ -141,7 +153,7 @@ def get_adp_token() -> Optional[str]:
         "client_secret": client_secret,
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    verify_arg = get_ca_bundle()
+    verify_arg = get_adp_ca_bundle()
     try:
         resp = requests.post(
             token_url,
@@ -362,7 +374,7 @@ def get_adp_employees(token: str, limit: int = 50, offset: int = 0, paginate_all
         client_cert = pem_path
 
     headers = {"Authorization": f"Bearer {token}"}
-    verify_arg = get_ca_bundle()
+    verify_arg = get_adp_ca_bundle()
     current_offset = offset
 
     while True:
