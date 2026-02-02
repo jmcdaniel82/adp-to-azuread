@@ -206,7 +206,7 @@ class DummyConnConstraint(DummyConn):
         self.add_calls += 1
         self.add_called = dn
         self.add_attributes = attributes
-        self.result = {"result": 19, "description": "constraintViolation"}
+        self.result = {"result": 19, "description": "constraintViolation", "message": "Attr otherAttribute"}
         return False
 
 
@@ -215,4 +215,34 @@ def test_provision_user_constraint_violation_no_retry():
     emp = _make_emp("Jane", "Doe")
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
     assert conn.add_calls == 1
+
+
+class DummyConnUPNConstraint(DummyConn):
+    def __init__(self):
+        super().__init__()
+        self.add_calls = 0
+        self.result = {}
+
+    def add(self, dn, attributes=None):
+        self.add_calls += 1
+        self.add_called = dn
+        self.add_attributes = attributes
+        if self.add_calls == 1:
+            self.result = {
+                "result": 19,
+                "description": "constraintViolation",
+                "message": "problem 1005 (CONSTRAINT_ATT_TYPE), Att 90290 (userPrincipalName)",
+            }
+            return False
+        self.result = {"result": 0}
+        return True
+
+
+def test_provision_user_upn_constraint_retries_with_suffix():
+    conn = DummyConnUPNConstraint()
+    emp = _make_emp("Janet", "Jones")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_calls == 2
+    assert conn.add_called == "CN=Janet Jones 2,ou=Users,dc=example,dc=com"
+    assert conn.add_attributes["sAMAccountName"].endswith("2")
 

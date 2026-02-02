@@ -522,7 +522,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         "userPrincipalName", "mail", "sAMAccountName", "employeeID", "userAccountControl"
     }
     dn = None
-    for attempt in range(50):
+    attempt = 0
+    while attempt < 50:
         if hasattr(conn, "bound") and not conn.bound:
             try:
                 conn.bind()
@@ -552,14 +553,29 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             dn = dn_candidate
             break
         result = conn.result or {}
+        msg = str(result.get("message") or "")
         if result.get("result") == 68:
             logging.warning(f"Add failed for {dn_candidate} (entryAlreadyExists); retrying with suffix")
+            attempt += 1
             continue
         if result.get("result") == 19:
+            if "userPrincipalName" in msg or "sAMAccountName" in msg:
+                logging.warning(f"Add failed for {dn_candidate} (constraintViolation on account id); retrying with suffix")
+                attempt += 1
+                continue
             logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
             return
+        if result.get("result") == 1 and "successful bind must be completed" in msg:
+            logging.warning(f"Add failed for {dn_candidate} (bind lost); rebinding and retrying")
+            try:
+                conn.rebind()
+            except Exception as e:
+                logging.error(f"Rebind failed after bind-lost error: {e}")
+                return
+            continue
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
         return
+        attempt += 1
     if not dn:
         logging.error(f"Add failed for base CN '{full_name}': exceeded unique CN attempts")
         return
