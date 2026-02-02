@@ -78,6 +78,7 @@ class DummyConn:
     def __init__(self):
         self.entries = []
         self.add_called = None
+        self.add_attributes = None
         self.modify_calls = []
         microsoft = types.SimpleNamespace(modify_password=self.modify_password)
         self.extend = types.SimpleNamespace(microsoft=microsoft)
@@ -87,6 +88,7 @@ class DummyConn:
 
     def add(self, dn, attributes=None):
         self.add_called = dn
+        self.add_attributes = attributes
         return True
 
     def modify_password(self, dn, pwd):
@@ -97,9 +99,9 @@ class DummyConn:
         return True
 
 
-def _make_emp(name):
+def _make_emp(first, last):
     return {
-        "person": {"preferredName": {"formattedName": name}},
+        "person": {"preferredName": {"givenName": first, "familyName1": last}},
         "workAssignments": [
             {"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}
         ],
@@ -109,14 +111,21 @@ def _make_emp(name):
 
 def test_provision_user_dn_escapes_comma():
     conn = DummyConn()
-    emp = _make_emp("Smith, Bob")
+    emp = _make_emp("Bob", "Smith, Jr")
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
-    assert conn.add_called == "CN=Smith\\, Bob,ou=Users,dc=example,dc=com"
+    assert conn.add_called == "CN=Bob Smith\\, Jr,ou=Users,dc=example,dc=com"
 
 
 def test_provision_user_dn_escapes_equal():
     conn = DummyConn()
-    emp = _make_emp("Foo=Bar")
+    emp = _make_emp("Foo", "Bar=Qux")
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
-    assert conn.add_called == "CN=Foo\\=Bar,ou=Users,dc=example,dc=com"
+    assert conn.add_called == "CN=Foo Bar\\=Qux,ou=Users,dc=example,dc=com"
+
+
+def test_provision_user_samaccountname_max_10_chars():
+    conn = DummyConn()
+    emp = _make_emp("A", "VeryLongLastName")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert len(conn.add_attributes["sAMAccountName"]) <= 10
 

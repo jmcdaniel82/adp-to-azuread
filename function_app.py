@@ -85,6 +85,22 @@ def get_ca_bundle() -> str:
 
 # ---- Helper functions ----
 
+def parse_datetime(value: str, context: str) -> Optional[datetime]:
+    """Parse ISO-like datetime strings, including a trailing 'Z' for UTC."""
+    if not value:
+        return None
+    try:
+        val = value.strip()
+        if val.endswith("Z"):
+            val = val[:-1] + "+00:00"
+        dt = datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception as e:
+        logging.error(f"Error parsing {context} '{value}': {e}")
+        return None
+
 def get_adp_token() -> Optional[str]:
     """
     Retrieve an OAuth access token from ADP using client credentials.
@@ -149,13 +165,9 @@ def get_hire_date(employee):
         for key in ("hireDate", "actualStartDate"):
             d = wa[0].get(key)
             if d:
-                try:
-                    dt = datetime.fromisoformat(d)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                dt = parse_datetime(d, f"assignment {key}")
+                if dt:
                     return dt.isoformat()
-                except Exception as e:
-                    logging.error(f"Error parsing assignment {key} '{d}': {e}")
     wd = employee.get("workerDates")
     dates = []
     if isinstance(wd, list):
@@ -163,24 +175,16 @@ def get_hire_date(employee):
             if "hire" in item.get("type", "").lower():
                 d = item.get("value")
                 if d:
-                    try:
-                        dt = datetime.fromisoformat(d)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
+                    dt = parse_datetime(d, "workerDates hire")
+                    if dt:
                         dates.append(dt)
-                    except Exception as e:
-                        logging.error(f"Error parsing workerDates hire '{d}': {e}")
     elif isinstance(wd, dict):
         for key in ("originalHireDate", "hireDate", "hire_date"):
             d = wd.get(key)
             if d:
-                try:
-                    dt = datetime.fromisoformat(d)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                dt = parse_datetime(d, f"workerDates {key}")
+                if dt:
                     dates.append(dt)
-                except Exception as e:
-                    logging.error(f"Error parsing workerDates {key} '{d}': {e}")
     if dates:
         return max(dates).isoformat()
     return None
@@ -363,14 +367,14 @@ def get_adp_employees(token: str, limit: int = 50, offset: int = 0, paginate_all
             logging.error(f"Failed to retrieve employees: {e}")
             return None
         if not response.ok:
-            logging.error(f"Failed to retrieve employees: {response.text}")
-            break
+            logging.error(f"Failed to retrieve employees (HTTP {response.status_code}): {response.text}")
+            return None
 
         try:
             data = response.json()
         except json.JSONDecodeError:
             logging.error(f"Failed to decode JSON from ADP response: {response.text}")
-            break
+            return None
 
         page_employees = data.get("workers", [])
         employees.extend(page_employees)
@@ -391,17 +395,18 @@ def get_status(emp):
     td = get_termination_date(emp)
     if not hd:
         return "Inactive"
-    h = datetime.fromisoformat(hd)
-    if h.tzinfo is None:
-        h = h.replace(tzinfo=timezone.utc)
+    h = parse_datetime(hd, "hireDate")
+    if not h:
+        return "Inactive"
     now = datetime.now(timezone.utc)
     if h > now:
         return "Inactive"
     if not td:
         return "Active"
-    t = datetime.fromisoformat(td)
-    if t.tzinfo is None:
-        t = t.replace(tzinfo=timezone.utc)
+    t = parse_datetime(td, "terminationDate")
+    if not t:
+        logging.warning(f"Invalid termination date '{td}' for employee; treating as Active")
+        return "Active"
     return "Active" if t > now else "Inactive"
 
 
@@ -433,6 +438,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
 
     person = user_data.get("person", {})
     first, last = get_first_last(person)
+    if not first or not last:
+        logging.warning(f"Skipping user with incomplete name data: {user_data}")
+        return
     full_name = f"{first} {last}".strip()
     if not full_name:
         logging.warning(f"Skipping user with incomplete name data: {user_data}")
@@ -457,7 +465,11 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         return
 
     # Build attributes for new user
-    base_sam = sanitize_string_for_sam(first[0].lower() + last.lower())
+    base_sam_raw = sanitize_string_for_sam(first[0].lower() + last.lower())
+    base_sam = base_sam_raw[:10]
+    if not base_sam:
+        logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
+        return
     attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
         "cn": full_name,
@@ -522,7 +534,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
     logging.info(f"ℹ️  Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
     
     today = datetime.now(tz=timezone.utc).date()
-    cutoff = today - timedelta(days=0)
+    cutoff = today
     employees_recent = []
     for emp in employees_with_hire_date:
         hire_str = get_hire_date(emp)
@@ -654,7 +666,7 @@ def normalize_dept(dept: str) -> str:
     return ''.join(c for c in dept.lower().strip() if c.isalnum() or c.isspace())
 
 
-def fetch_ad_data_task() -> dict:
+def fetch_ad_data_task() -> Optional[dict]:
     """Fetch all AD users and build a map of employeeID -> department."""
     ldap_server = os.getenv("LDAP_SERVER")
     ldap_user = os.getenv("LDAP_USER")
@@ -663,19 +675,19 @@ def fetch_ad_data_task() -> dict:
 
     if not all([ldap_server, ldap_user, ldap_password, ldap_search_base]):
         logging.error("Missing LDAP configuration for export.")
-        return {}
+        return None
 
     try:
         ca_bundle = get_ca_bundle()
         logging.info(f"🔐 Using CA bundle for export: {ca_bundle}")
     except Exception as e:
         logging.error(f"❌ Unable to determine CA bundle for export: {e}")
-        return {}
+        return None
 
     tls = Tls(
-    validate=ssl.CERT_REQUIRED,
-    version=ssl.PROTOCOL_TLS_CLIENT,
-    ca_certs_file=os.getenv("CA_BUNDLE_PATH")
+        validate=ssl.CERT_REQUIRED,
+        version=ssl.PROTOCOL_TLS_CLIENT,
+        ca_certs_file=ca_bundle,
     )
 
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls, get_info=None)
@@ -690,7 +702,7 @@ def fetch_ad_data_task() -> dict:
         logging.info("🔗 LDAP connection opened for export.")
     except Exception as e:
         logging.error(f"Failed to connect to LDAP: {e}")
-        return {}
+        return None
 
     ldap_map: dict[str, str] = {}
     page_size = 500

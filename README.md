@@ -8,7 +8,7 @@ Functionality
 
 Retrieves employee data securely from ADP WFN using Mutual TLS.
 
-Filters and identifies new employees hired today.
+Filters and identifies new employees hired today (UTC) to minimize the scope and reduce errors.
 
 Creates and provisions new users into your local Active Directory.
 
@@ -20,7 +20,7 @@ cn (Common Name)
 
 accountDisabled (based on ADP status)
 
-sAMAccountName (First initial + Last name, max 10 chars)
+sAMAccountName (First initial + Last name, max 10 chars enforced)
 
 co (Country)
 
@@ -86,7 +86,7 @@ Azure Function Endpoints
 
 Scheduled Sync
 
-Runs automatically to provision users who have a hire date matching today's date.
+Runs automatically to provision users who have a hire date matching today's date (UTC) only.
 
 Manual HTTP Trigger
 
