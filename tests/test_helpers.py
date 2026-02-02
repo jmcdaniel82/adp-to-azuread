@@ -195,3 +195,24 @@ def test_get_adp_ca_bundle_prefers_certifi(tmp_path, monkeypatch):
     monkeypatch.setenv("ADP_CA_BUNDLE_PATH", str(fake_path))
     assert get_adp_ca_bundle() == str(fake_path)
 
+
+class DummyConnConstraint(DummyConn):
+    def __init__(self):
+        super().__init__()
+        self.add_calls = 0
+        self.result = {}
+
+    def add(self, dn, attributes=None):
+        self.add_calls += 1
+        self.add_called = dn
+        self.add_attributes = attributes
+        self.result = {"result": 19, "description": "constraintViolation"}
+        return False
+
+
+def test_provision_user_constraint_violation_no_retry():
+    conn = DummyConnConstraint()
+    emp = _make_emp("Jane", "Doe")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_calls == 1
+

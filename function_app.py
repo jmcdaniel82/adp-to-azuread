@@ -520,6 +520,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     }
     dn = None
     for attempt in range(50):
+        if hasattr(conn, "bound") and not conn.bound:
+            try:
+                conn.bind()
+            except Exception as e:
+                logging.error(f"Rebind failed before add attempt: {e}")
+                return
         suffix = "" if attempt == 0 else str(attempt + 1)
         cn = full_name if not suffix else f"{full_name} {suffix}"
         sam = build_sam(suffix)
@@ -543,9 +549,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             dn = dn_candidate
             break
         result = conn.result or {}
-        if result.get("result") in (68, 19):
-            logging.warning(f"Add failed for {dn_candidate} ({result.get('description')}); retrying with suffix")
+        if result.get("result") == 68:
+            logging.warning(f"Add failed for {dn_candidate} (entryAlreadyExists); retrying with suffix")
             continue
+        if result.get("result") == 19:
+            logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
+            return
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
         return
     if not dn:
