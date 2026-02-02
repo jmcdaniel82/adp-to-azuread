@@ -43,7 +43,13 @@ sys.modules["azure"] = azure_mod
 sys.modules["azure.functions"] = func_mod
 
 import re
-from function_app import get_hire_date, generate_password, provision_user_in_ad
+from function_app import (
+    get_hire_date,
+    generate_password,
+    provision_user_in_ad,
+    extract_work_address_field,
+    extract_state_from_work,
+)
 
 
 def test_get_hire_date_from_work_assignment():
@@ -154,4 +160,30 @@ def test_provision_user_cn_collision_adds_suffix():
     assert conn.add_calls == 2
     assert conn.add_called == "CN=Bob Smith 2,ou=Users,dc=example,dc=com"
     assert conn.add_attributes["sAMAccountName"].endswith("2")
+
+
+def test_extract_work_address_field_falls_back_to_home():
+    emp = {
+        "workAssignments": [
+            {
+                "assignedWorkLocations": [{"address": {"nameCode": {"shortName": "HQ"}}}],
+                "homeWorkLocation": {"address": {"countryCode": "US"}},
+            }
+        ]
+    }
+    assert extract_work_address_field(emp, "countryCode") == "US"
+
+
+def test_extract_state_from_work_falls_back_to_home():
+    emp = {
+        "workAssignments": [
+            {
+                "assignedWorkLocations": [{"address": {"nameCode": {"shortName": "HQ"}}}],
+                "homeWorkLocation": {
+                    "address": {"countrySubdivisionLevel1": {"codeValue": "NC"}}
+                },
+            }
+        ]
+    }
+    assert extract_state_from_work(emp) == "NC"
 
