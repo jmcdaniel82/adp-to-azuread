@@ -466,19 +466,23 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
 
     # Build attributes for new user
     base_sam_raw = sanitize_string_for_sam(first[0].lower() + last.lower())
-    base_sam = base_sam_raw[:10]
-    if not base_sam:
+    if not base_sam_raw:
         logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
         return
-    attrs = {
+    base_alias = sanitize_string_for_sam(first.lower()) + sanitize_string_for_sam(last.lower())
+    if not base_alias:
+        base_alias = base_sam_raw
+
+    def build_sam(suffix: str) -> str:
+        if not suffix:
+            return base_sam_raw[:10]
+        max_base_len = max(0, 10 - len(suffix))
+        return f"{base_sam_raw[:max_base_len]}{suffix}"
+
+    base_attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
-        "cn": full_name,
         "givenName": first,
         "sn": last,
-        "displayName": full_name,
-        "userPrincipalName": f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@us.corp.cfsbrands.com",
-        "mail": f"{sanitize_string_for_sam(first.lower())}{sanitize_string_for_sam(last.lower())}@cfsbrands.com",
-        "sAMAccountName": base_sam,
         "employeeID": emp_id,
         "title": extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle"),
         "department": extract_department(user_data),
@@ -496,10 +500,38 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         "objectClass", "cn", "givenName", "sn", "displayName",
         "userPrincipalName", "mail", "sAMAccountName", "employeeID", "userAccountControl"
     }
-    final_attrs = {k: v for k, v in attrs.items() if v or k in mandatory}
-    dn = f"CN={escape_rdn(full_name)},{ldap_create_base}"
-    if not conn.add(dn, attributes=final_attrs):
-        logging.error(f"Add failed for {dn}: {conn.result}")
+    dn = None
+    for attempt in range(50):
+        suffix = "" if attempt == 0 else str(attempt + 1)
+        cn = full_name if not suffix else f"{full_name} {suffix}"
+        sam = build_sam(suffix)
+        if not sam:
+            logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
+            return
+        alias = base_alias if not suffix else f"{base_alias}{suffix}"
+        attrs = dict(base_attrs)
+        attrs.update(
+            {
+                "cn": cn,
+                "displayName": cn,
+                "userPrincipalName": f"{alias}@us.corp.cfsbrands.com",
+                "mail": f"{alias}@cfsbrands.com",
+                "sAMAccountName": sam,
+            }
+        )
+        final_attrs = {k: v for k, v in attrs.items() if v or k in mandatory}
+        dn_candidate = f"CN={escape_rdn(cn)},{ldap_create_base}"
+        if conn.add(dn_candidate, attributes=final_attrs):
+            dn = dn_candidate
+            break
+        result = conn.result or {}
+        if result.get("result") in (68, 19):
+            logging.warning(f"Add failed for {dn_candidate} ({result.get('description')}); retrying with suffix")
+            continue
+        logging.error(f"Add failed for {dn_candidate}: {conn.result}")
+        return
+    if not dn:
+        logging.error(f"Add failed for base CN '{full_name}': exceeded unique CN attempts")
         return
     logging.info(f"User created: {dn} (hireDate={hire_date})")
 

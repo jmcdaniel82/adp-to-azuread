@@ -129,3 +129,29 @@ def test_provision_user_samaccountname_max_10_chars():
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
     assert len(conn.add_attributes["sAMAccountName"]) <= 10
 
+
+class DummyConnCollision(DummyConn):
+    def __init__(self):
+        super().__init__()
+        self.add_calls = 0
+        self.result = {}
+
+    def add(self, dn, attributes=None):
+        self.add_calls += 1
+        self.add_called = dn
+        self.add_attributes = attributes
+        if self.add_calls == 1:
+            self.result = {"result": 68, "description": "entryAlreadyExists"}
+            return False
+        self.result = {"result": 0}
+        return True
+
+
+def test_provision_user_cn_collision_adds_suffix():
+    conn = DummyConnCollision()
+    emp = _make_emp("Bob", "Smith")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_calls == 2
+    assert conn.add_called == "CN=Bob Smith 2,ou=Users,dc=example,dc=com"
+    assert conn.add_attributes["sAMAccountName"].endswith("2")
+
