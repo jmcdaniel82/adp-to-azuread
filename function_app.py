@@ -448,22 +448,34 @@ def generate_password(length: int = 24) -> str:
             return pwd
 
 
-def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
+def _format_ldap_error(conn) -> str:
+    """Build a concise LDAP error string from connection state."""
+    parts = []
+    result = getattr(conn, "result", None)
+    if result:
+        parts.append(f"result={result}")
+    last_error = getattr(conn, "last_error", None)
+    if last_error:
+        parts.append(f"last_error={last_error}")
+    return "; ".join(parts) if parts else "no ldap error details"
+
+
+def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, conn_factory=None):
     """Create and enable an AD user using data from ADP."""
     country_code = extract_work_address_field(user_data, "countryCode") or ""
     if not country_code.upper() or country_code.upper() == "MX":
         logging.info(f"Skipping provisioning for country code '{country_code}'")
-        return
+        return conn
 
     person = user_data.get("person", {})
     first, last = get_first_last(person)
     if not first or not last:
         logging.warning(f"Skipping user with incomplete name data: {user_data}")
-        return
+        return conn
     full_name = f"{first} {last}".strip()
     if not full_name:
         logging.warning(f"Skipping user with incomplete name data: {user_data}")
-        return
+        return conn
 
     emp_id = extract_employee_id(user_data)
     hire_date = get_hire_date(user_data) or "<no hire date>"
@@ -481,13 +493,13 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         if manager_dn:
             conn.modify(conn.entries[0].distinguishedName.value,
                         {"manager": [(MODIFY_REPLACE, [manager_dn])]})
-        return
+        return conn
 
     # Build attributes for new user
     base_sam_raw = sanitize_string_for_sam(first[0].lower() + last.lower())
     if not base_sam_raw:
         logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
-        return
+        return conn
     base_alias = sanitize_string_for_sam(first.lower()) + sanitize_string_for_sam(last.lower())
     if not base_alias:
         base_alias = base_sam_raw
@@ -526,19 +538,21 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     attempt = 0
     bind_retries = 0
     max_bind_retries = 3
+    reconnect_attempts = 0
+    max_reconnect_attempts = 2
     while attempt < 50:
         if hasattr(conn, "bound") and not conn.bound:
             try:
                 conn.bind()
             except Exception as e:
                 logging.error(f"Rebind failed before add attempt: {e}")
-                return
+                return conn
         suffix = "" if attempt == 0 else str(attempt + 1)
         cn = full_name if not suffix else f"{full_name} {suffix}"
         sam = build_sam(suffix)
         if not sam:
             logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
-            return
+            return conn
         alias = base_alias if not suffix else f"{base_alias}{suffix}"
         attrs = dict(base_attrs)
         attrs.update(
@@ -567,28 +581,59 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
                 attempt += 1
                 continue
             logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
-            return
+            return conn
         if result.get("result") == 1 and "successful bind must be completed" in msg:
+            logging.warning(f"Bind lost details: {_format_ldap_error(conn)}")
             if bind_retries >= max_bind_retries:
+                if conn_factory and reconnect_attempts < max_reconnect_attempts:
+                    logging.warning(f"Add failed for {dn_candidate} after {max_bind_retries} rebinds; reconnecting")
+                    reconnect_attempts += 1
+                    try:
+                        try:
+                            conn.unbind()
+                        except Exception:
+                            pass
+                        conn = conn_factory()
+                        bind_retries = 0
+                        time.sleep(0.5)
+                        continue
+                    except Exception as e:
+                        logging.error(f"Reconnect failed after bind loss: {e}")
+                        return conn
                 logging.error(f"Add failed for {dn_candidate}: bind lost after {max_bind_retries} retries")
-                return
+                return conn
             logging.warning(f"Add failed for {dn_candidate} (bind lost); rebinding and retrying")
             bind_retries += 1
             try:
                 if not conn.rebind():
-                    logging.error(f"Rebind failed after bind-lost error: {conn.result}")
-                    return
+                    logging.error(f"Rebind failed after bind-lost error: {_format_ldap_error(conn)}")
+                    if conn_factory and reconnect_attempts < max_reconnect_attempts:
+                        reconnect_attempts += 1
+                        logging.warning(f"Attempting reconnect after rebind failure (attempt {reconnect_attempts})")
+                        try:
+                            try:
+                                conn.unbind()
+                            except Exception:
+                                pass
+                            conn = conn_factory()
+                            bind_retries = 0
+                            time.sleep(0.5)
+                            continue
+                        except Exception as e:
+                            logging.error(f"Reconnect failed after rebind failure: {e}")
+                            return conn
+                    return conn
             except Exception as e:
                 logging.error(f"Rebind failed after bind-lost error: {e}")
-                return
+                return conn
             time.sleep(0.5)
             continue
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
-        return
+        return conn
         attempt += 1
     if not dn:
         logging.error(f"Add failed for base CN '{full_name}': exceeded unique CN attempts")
-        return
+        return conn
     logging.info(f"User created: {dn} (hireDate={hire_date})")
 
     # Set password and enable account
@@ -600,6 +645,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
         logging.info(f"Account enabled and password set for {dn}")
     except Exception as e:
         logging.error(f"Password or enable failed for {dn}: {e}")
+    return conn
 
 # ---- Scheduled sync every 15m ----
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
@@ -664,13 +710,15 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
 
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
-        conn = Connection(
-            server,
-            user=ldap_user,
-            password=ldap_password,
-            authentication=NTLM,
-            auto_bind=True,
-        )
+        def conn_factory():
+            return Connection(
+                server,
+                user=ldap_user,
+                password=ldap_password,
+                authentication=NTLM,
+                auto_bind=True,
+            )
+        conn = conn_factory()
     except Exception as e:
         logging.error(f"❌ Failed to connect to LDAP server: {e}")
         return
@@ -682,7 +730,11 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
         name = f"{first} {last}".strip() or "<no name>"
         logging.info(f"➡️  Processing {emp_id} / {name}")
         try:
-            provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base)
+            new_conn = provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base, conn_factory)
+            if not new_conn:
+                logging.error("LDAP connection unavailable; aborting scheduled_adp_sync")
+                break
+            conn = new_conn
         except Exception as e:
             logging.error(f"❌ Exception provisioning {emp_id}: {e}")
     conn.unbind()
