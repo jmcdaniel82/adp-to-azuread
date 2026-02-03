@@ -7,6 +7,7 @@ import ssl
 import secrets
 import string
 import tempfile  # used to write PEM content to a temporary file
+import time      # used for small backoff between bind retries
 import base64    # used to decode base64-encoded certificates or keys
 import certifi   # fallback CA bundle provider
 import azure.functions as func
@@ -523,6 +524,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
     }
     dn = None
     attempt = 0
+    bind_retries = 0
+    max_bind_retries = 3
     while attempt < 50:
         if hasattr(conn, "bound") and not conn.bound:
             try:
@@ -566,12 +569,19 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base):
             logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
             return
         if result.get("result") == 1 and "successful bind must be completed" in msg:
+            if bind_retries >= max_bind_retries:
+                logging.error(f"Add failed for {dn_candidate}: bind lost after {max_bind_retries} retries")
+                return
             logging.warning(f"Add failed for {dn_candidate} (bind lost); rebinding and retrying")
+            bind_retries += 1
             try:
-                conn.rebind()
+                if not conn.rebind():
+                    logging.error(f"Rebind failed after bind-lost error: {conn.result}")
+                    return
             except Exception as e:
                 logging.error(f"Rebind failed after bind-lost error: {e}")
                 return
+            time.sleep(0.5)
             continue
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
         return
