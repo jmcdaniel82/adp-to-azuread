@@ -114,6 +114,36 @@ def parse_datetime(value: str, context: str) -> Optional[datetime]:
         logging.error(f"Error parsing {context} '{value}': {e}")
         return None
 
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    """Return True for common truthy environment values."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def extract_last_updated(emp) -> Optional[datetime]:
+    """Extract a best-effort last-updated timestamp from an ADP worker record."""
+    candidates = [
+        emp.get("meta", {}).get("lastUpdatedDateTime"),
+        emp.get("meta", {}).get("lastUpdatedTimestamp"),
+        emp.get("meta", {}).get("lastUpdateDateTime"),
+        emp.get("lastUpdatedDateTime"),
+        emp.get("lastUpdatedTimestamp"),
+        emp.get("lastUpdateDateTime"),
+    ]
+    wa = emp.get("workAssignments")
+    if isinstance(wa, list) and wa:
+        candidates.append(wa[0].get("lastUpdatedDateTime"))
+        candidates.append(wa[0].get("lastUpdatedTimestamp"))
+    for val in candidates:
+        if val:
+            dt = parse_datetime(val, "lastUpdated")
+            if dt:
+                return dt
+    return None
+
 def get_adp_token() -> Optional[str]:
     """
     Retrieve an OAuth access token from ADP using client credentials.
@@ -460,6 +490,99 @@ def _format_ldap_error(conn) -> str:
     return "; ".join(parts) if parts else "no ldap error details"
 
 
+def _entry_attr_value(entry, attr: str):
+    """Safely fetch an LDAP entry attribute value."""
+    try:
+        if hasattr(entry, attr):
+            return getattr(entry, attr).value
+        return entry[attr].value
+    except Exception:
+        return None
+
+
+def _build_update_attributes(emp, conn, ldap_search_base) -> dict:
+    """Map ADP worker data to AD attributes used for updates."""
+    country_code = extract_work_address_field(emp, "countryCode")
+    co_value = None
+    if country_code:
+        co_value = "United States" if country_code.upper() == "US" else country_code
+
+    desired = {
+        "title": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
+        "department": extract_department(emp),
+        "company": extract_company(emp),
+        "l": extract_work_address_field(emp, "cityName"),
+        "postalCode": extract_work_address_field(emp, "postalCode"),
+        "st": extract_state_from_work(emp),
+        "streetAddress": extract_work_address_field(emp, "lineOne"),
+        "co": co_value,
+    }
+    if get_hire_date(emp):
+        desired["userAccountControl"] = get_user_account_control(emp)
+    manager_dn = get_manager_dn(conn, ldap_search_base, extract_manager_id(emp))
+    if manager_dn:
+        desired["manager"] = manager_dn
+    return desired
+
+
+def _diff_update_attributes(entry, desired: dict) -> dict:
+    """Compute LDAP modify operations for attributes that differ."""
+    changes = {}
+    for attr, desired_val in desired.items():
+        if desired_val in (None, ""):
+            continue
+        current = _entry_attr_value(entry, attr)
+        if isinstance(desired_val, str):
+            current_str = (current or "").strip()
+            desired_str = desired_val.strip()
+            if attr == "manager":
+                if current_str.lower() == desired_str.lower():
+                    continue
+            elif current_str == desired_str:
+                continue
+        else:
+            if current == desired_val:
+                continue
+        changes[attr] = [(MODIFY_REPLACE, [desired_val])]
+    return changes
+
+
+def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -> Optional[Connection]:
+    """Apply LDAP modifications with basic bind-lost recovery."""
+    if not changes:
+        return conn
+    if conn.modify(dn, changes):
+        return conn
+    result = conn.result or {}
+    msg = str(result.get("message") or "")
+    if result.get("result") == 1 and "successful bind must be completed" in msg:
+        logging.warning(f"Modify failed for {dn} (bind lost); attempting rebind")
+        try:
+            if conn.rebind():
+                if conn.modify(dn, changes):
+                    return conn
+            else:
+                logging.error(f"Rebind failed during modify: {_format_ldap_error(conn)}")
+        except Exception as e:
+            logging.error(f"Rebind failed during modify: {e}")
+        if conn_factory:
+            logging.warning(f"Reconnecting LDAP after modify bind loss for {dn}")
+            try:
+                try:
+                    conn.unbind()
+                except Exception:
+                    pass
+                conn = conn_factory()
+                if conn.modify(dn, changes):
+                    return conn
+            except Exception as e:
+                logging.error(f"Reconnect failed during modify: {e}")
+        logging.error(f"Modify failed for {dn}: {_format_ldap_error(conn)}")
+        return conn
+    logging.error(f"Modify failed for {dn}: {conn.result}")
+    return conn
+
+
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, conn_factory=None):
     """Create and enable an AD user using data from ADP."""
     country_code = extract_work_address_field(user_data, "countryCode") or ""
@@ -739,6 +862,149 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
             logging.error(f"❌ Exception provisioning {emp_id}: {e}")
     conn.unbind()
     logging.info("🔒 LDAP connection closed — scheduled_adp_sync complete")
+
+
+# ---- Scheduled update sync (dry run by default) ----
+@app.schedule(schedule="0 0 * * * *", arg_name="mytimer", run_on_startup=False)
+def scheduled_adp_update(mytimer: func.TimerRequest):
+    """Timer triggered function that updates existing AD users from ADP (dry run by default)."""
+    dry_run = _env_truthy("UPDATE_DRY_RUN", True)
+    lookback_days_raw = os.getenv("UPDATE_LOOKBACK_DAYS", "7")
+    try:
+        lookback_days = int(lookback_days_raw)
+    except ValueError:
+        lookback_days = 7
+    include_missing_updates = _env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True)
+    log_no_changes = _env_truthy("UPDATE_LOG_NO_CHANGES", False)
+
+    logging.info(f"🔁 scheduled_adp_update triggered (dry_run={dry_run}, lookback_days={lookback_days})")
+    token = get_adp_token()
+    if not token:
+        logging.error("❌ Failed to retrieve ADP token for update.")
+        return
+    logging.info("✅ ADP token acquired for update")
+    all_employees = get_adp_employees(token)
+    if all_employees is None:
+        logging.error("❌ get_adp_employees returned None for update")
+        return
+
+    candidates = []
+    missing_last_updated = 0
+    if lookback_days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        for emp in all_employees:
+            updated_at = extract_last_updated(emp)
+            if updated_at and updated_at >= cutoff:
+                candidates.append(emp)
+            elif not updated_at:
+                missing_last_updated += 1
+                if include_missing_updates:
+                    candidates.append(emp)
+        logging.info(
+            f"ℹ️  {len(candidates)} ADP employees considered for update since {cutoff.date().isoformat()} "
+            f"(missing lastUpdated={missing_last_updated})"
+        )
+    else:
+        candidates = all_employees
+        logging.info(f"ℹ️  {len(candidates)} ADP employees considered for update (no lookback filter)")
+
+    if not candidates:
+        logging.info("🚫 Nothing to update; exiting scheduled_adp_update")
+        return
+
+    ldap_server = os.getenv("LDAP_SERVER")
+    ldap_user = os.getenv("LDAP_USER")
+    ldap_password = os.getenv("LDAP_PASSWORD")
+    ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
+
+    ca_bundle = get_ca_bundle()
+    logging.info(f"Using CA bundle at '{ca_bundle}' for LDAP update")
+    if not os.path.isfile(ca_bundle):
+        logging.error(f"CA bundle not found at {ca_bundle}")
+        return
+
+    tls_config = Tls(
+        ca_certs_file=ca_bundle,
+        validate=ssl.CERT_REQUIRED,
+        version=ssl.PROTOCOL_TLSv1_2,
+    )
+
+    server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
+    try:
+        def conn_factory():
+            return Connection(
+                server,
+                user=ldap_user,
+                password=ldap_password,
+                authentication=NTLM,
+                auto_bind=True,
+            )
+        conn = conn_factory()
+    except Exception as e:
+        logging.error(f"❌ Failed to connect to LDAP server for update: {e}")
+        return
+
+    logging.info("🔗 LDAP connection opened for update")
+    updated_users = 0
+    total_changes = 0
+    missing_in_ad = 0
+    for emp in candidates:
+        emp_id = extract_employee_id(emp)
+        if not emp_id:
+            continue
+        conn.search(
+            ldap_search_base,
+            f"(employeeID={emp_id})",
+            SUBTREE,
+            attributes=[
+                "distinguishedName",
+                "employeeID",
+                "title",
+                "department",
+                "company",
+                "l",
+                "st",
+                "postalCode",
+                "streetAddress",
+                "co",
+                "manager",
+                "userAccountControl",
+            ],
+        )
+        if not conn.entries:
+            missing_in_ad += 1
+            continue
+        entry = conn.entries[0]
+        dn = _entry_attr_value(entry, "distinguishedName") or "<unknown DN>"
+        desired = _build_update_attributes(emp, conn, ldap_search_base)
+        changes = _diff_update_attributes(entry, desired)
+        if not changes:
+            if log_no_changes:
+                logging.info(f"✅ No updates needed for {emp_id} at {dn}")
+            continue
+        updated_users += 1
+        for attr, ops in changes.items():
+            desired_val = ops[0][1][0] if ops and ops[0][1] else None
+            current_val = _entry_attr_value(entry, attr)
+            if dry_run:
+                logging.info(f"🧪 DRY RUN update {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
+            else:
+                logging.info(f"Updating {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
+        total_changes += len(changes)
+        if not dry_run:
+            conn = _apply_ldap_modifications(conn, dn, changes, conn_factory)
+            if not conn:
+                logging.error("LDAP connection unavailable; aborting scheduled_adp_update")
+                break
+
+    try:
+        conn.unbind()
+    except Exception:
+        pass
+    logging.info(
+        f"🔒 LDAP connection closed — scheduled_adp_update complete "
+        f"(users_with_changes={updated_users}, total_changes={total_changes}, missing_in_ad={missing_in_ad})"
+    )
 
 
 # ---------------------------

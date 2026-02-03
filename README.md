@@ -12,6 +12,8 @@ Filters and identifies new employees hired today (UTC) to minimize the scope and
 
 Creates and provisions new users into your local Active Directory.
 
+Optionally scans ADP for recent updates and logs (dry run by default) the changes that would be applied to existing AD accounts.
+
 ADP Fields Synchronized
 
 employeeId
@@ -84,11 +86,25 @@ CA_BUNDLE_PATH
 
 UPN_SUFFIX
 
+Update Sync (Dry Run)
+
+UPDATE_DRY_RUN
+
+UPDATE_LOOKBACK_DAYS
+
+UPDATE_INCLUDE_MISSING_LAST_UPDATED
+
+UPDATE_LOG_NO_CHANGES
+
 Azure Function Endpoints
 
 Scheduled Sync
 
 Runs automatically to provision users who have a hire date matching today's date (UTC) only.
+
+Scheduled Update (Dry Run by Default)
+
+Runs hourly to compare ADP records with existing AD accounts and logs the updates that would be applied. Set UPDATE_DRY_RUN=false to enable writes.
 
 Manual HTTP Trigger
 
