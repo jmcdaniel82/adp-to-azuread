@@ -282,6 +282,13 @@ def extract_department(emp):
     wa = emp.get("workAssignments", [])
     if not wa:
         return ""
+    occ = wa[0].get("occupationalClassifications", [])
+    if isinstance(occ, list):
+        for item in occ:
+            code = item.get("classificationCode", {}) if isinstance(item, dict) else {}
+            val = code.get("shortName") or code.get("longName") or code.get("name")
+            if val:
+                return val
     for ou in wa[0].get("assignedOrganizationalUnits", []):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "department":
             return ou.get("nameCode", {}).get("shortName", "")

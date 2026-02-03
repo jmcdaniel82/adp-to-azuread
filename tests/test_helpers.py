@@ -50,6 +50,7 @@ from function_app import (
     extract_work_address_field,
     extract_state_from_work,
     get_adp_ca_bundle,
+    extract_department,
 )
 
 
@@ -187,6 +188,25 @@ def test_extract_state_from_work_falls_back_to_home():
         ]
     }
     assert extract_state_from_work(emp) == "NC"
+
+
+def test_extract_department_prefers_occupational_classification():
+    emp = {
+        "workAssignments": [
+            {
+                "occupationalClassifications": [
+                    {"classificationCode": {"shortName": "Information Tech"}}
+                ],
+                "assignedOrganizationalUnits": [
+                    {
+                        "typeCode": {"codeValue": "Department"},
+                        "nameCode": {"shortName": "Old Dept"},
+                    }
+                ],
+            }
+        ]
+    }
+    assert extract_department(emp) == "Information Tech"
 
 
 def test_get_adp_ca_bundle_prefers_certifi(tmp_path, monkeypatch):
