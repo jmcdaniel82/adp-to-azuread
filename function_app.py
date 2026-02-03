@@ -282,20 +282,37 @@ def extract_department(emp):
     wa = emp.get("workAssignments", [])
     if not wa:
         return ""
+    candidates = []
     occ = wa[0].get("occupationalClassifications", [])
     if isinstance(occ, list):
         for item in occ:
             code = item.get("classificationCode", {}) if isinstance(item, dict) else {}
             val = code.get("shortName") or code.get("longName") or code.get("name")
             if val:
-                return val
+                candidates.append(("occupationalClassifications.classificationCode", val))
+                break
     for ou in wa[0].get("assignedOrganizationalUnits", []):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "department":
-            return ou.get("nameCode", {}).get("shortName", "")
+            val = ou.get("nameCode", {}).get("shortName", "")
+            if val:
+                candidates.append(("assignedOrganizationalUnits.department", val))
+                break
     for ou in wa[0].get("homeOrganizationalUnits", []):
         if ou.get("typeCode", {}).get("codeValue", "").lower() == "department":
-            return ou.get("nameCode", {}).get("shortName", "")
-    return ""
+            val = ou.get("nameCode", {}).get("shortName", "")
+            if val:
+                candidates.append(("homeOrganizationalUnits.department", val))
+                break
+    if not candidates:
+        return ""
+    source, value = candidates[0]
+    if _env_truthy("LOG_DEPARTMENT_SOURCE", False):
+        emp_id = extract_employee_id(emp)
+        person = emp.get("person", {})
+        first, last = get_first_last(person)
+        name = f"{first} {last}".strip() or "<no name>"
+        logging.info(f"Department source for {emp_id} / {name}: {source} -> {value}")
+    return value
 
 def extract_business_title(emp):
     """Extracts the Business Title from the customFieldGroup."""
