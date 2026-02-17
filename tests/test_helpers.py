@@ -51,6 +51,8 @@ from function_app import (
     extract_state_from_work,
     get_adp_ca_bundle,
     extract_department,
+    resolve_local_ac_department,
+    normalize_department_name,
 )
 
 
@@ -114,6 +116,47 @@ def _make_emp(first, last):
             {"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}
         ],
         "workerID": {"idValue": "123"},
+    }
+
+
+def _make_department_emp(
+    assigned_dept=None,
+    occ_values=None,
+    job_title="",
+    business_title="",
+):
+    assigned_units = []
+    if assigned_dept:
+        assigned_units.append(
+            {
+                "typeCode": {"codeValue": "Department"},
+                "nameCode": {"shortName": assigned_dept},
+            }
+        )
+    occ = []
+    for value in occ_values or []:
+        occ.append({"classificationCode": {"shortName": value}})
+    additional_remunerations = []
+    if business_title:
+        additional_remunerations.append(
+            {
+                "itemID": "1",
+                "nameCode": {"codeValue": "Business Title"},
+                "stringValue": business_title,
+            }
+        )
+    return {
+        "person": {"preferredName": {"givenName": "Test", "familyName1": "User"}},
+        "workAssignments": [
+            {
+                "jobTitle": job_title,
+                "assignedOrganizationalUnits": assigned_units,
+                "occupationalClassifications": occ,
+            }
+        ],
+        "workerID": {"idValue": "999"},
+        "workerDates": {"hireDate": "2023-01-01"},
+        "additionalRemunerations": additional_remunerations,
     }
 
 
@@ -265,4 +308,55 @@ def test_provision_user_upn_constraint_retries_with_suffix():
     assert conn.add_calls == 2
     assert conn.add_called == "CN=Janet Jones 2,ou=Users,dc=example,dc=com"
     assert conn.add_attributes["sAMAccountName"].endswith("2")
+
+
+def test_customer_service_assigned_dept_maps_to_sales():
+    emp = _make_department_emp(assigned_dept="Customer Service - Salary")
+    result = resolve_local_ac_department(emp)
+    assert result["proposedDepartmentV2"] == "Sales"
+    assert result["departmentChangeReferenceField"] == "assignedDept"
+
+
+def test_professionals_does_not_force_administration_when_current_and_manager_finance():
+    emp = _make_department_emp(occ_values=["Professionals"])
+    result = resolve_local_ac_department(
+        emp,
+        current_ad_department="Finance",
+        manager_department="Finance",
+    )
+    assert normalize_department_name(result["proposedDepartmentV2"]) == "Finance"
+    assert normalize_department_name(result["proposedDepartmentV2"]) != "Administration"
+
+
+def test_administrative_support_workers_does_not_force_administration():
+    emp = _make_department_emp(occ_values=["Administrative Support Workers"])
+    result = resolve_local_ac_department(
+        emp,
+        current_ad_department="Supply Chain",
+        manager_department="Supply Chain",
+    )
+    assert normalize_department_name(result["proposedDepartmentV2"]) == "Supply Chain"
+    assert normalize_department_name(result["proposedDepartmentV2"]) != "Administration"
+
+
+def test_manager_alignment_blocks_low_confidence_overrides():
+    emp = _make_department_emp(occ_values=["Professionals"])
+    result = resolve_local_ac_department(
+        emp,
+        current_ad_department="Sales",
+        manager_department="Sales",
+    )
+    assert normalize_department_name(result["proposedDepartmentV2"]) == "Sales"
+    assert result["changeAllowed"] is False
+    assert result["blockReason"] == "blocked_by_manager_alignment"
+
+
+def test_administration_requires_gating_from_title_or_manager_or_assigned_dept():
+    admin_title_emp = _make_department_emp(job_title="Administrative Assistant")
+    admin_title_result = resolve_local_ac_department(admin_title_emp)
+    assert normalize_department_name(admin_title_result["proposedDepartmentV2"]) == "Administration"
+
+    ambiguous_emp = _make_department_emp(occ_values=["Professionals"])
+    ambiguous_result = resolve_local_ac_department(ambiguous_emp)
+    assert normalize_department_name(ambiguous_result["proposedDepartmentV2"]) != "Administration"
 
