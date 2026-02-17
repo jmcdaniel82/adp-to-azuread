@@ -48,3 +48,11 @@ __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 azurite/*.log
+
+# Generated department analysis report artifacts
+adp_active_users_ad_current_vs_scheduled_department.csv
+adp_active_users_ad_current_vs_scheduled_department_summary.json
+adp_active_users_ad_current_vs_scheduled_department_changes_only.csv
+dry_run_change_report.xlsx
+dry_run_change_report*.xlsx
+~$*.xlsx

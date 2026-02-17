@@ -76,7 +76,16 @@ def fetch_ad_user_maps():
                 ldap_search_base,
                 "(employeeID=*)",
                 SUBTREE,
-                attributes=["employeeID", "department", "manager", "displayName", "distinguishedName"],
+                attributes=[
+                    "employeeID",
+                    "department",
+                    "manager",
+                    "displayName",
+                    "distinguishedName",
+                    "title",
+                    "givenName",
+                    "sn",
+                ],
                 paged_size=page_size,
                 paged_cookie=cookie,
             )
@@ -91,10 +100,18 @@ def fetch_ad_user_maps():
                     "displayName": (entry_value(entry, "displayName") or "").strip(),
                     "department": dept,
                     "employeeID": employee_id,
+                    "title": (entry_value(entry, "title") or "").strip(),
+                    "givenName": (entry_value(entry, "givenName") or "").strip(),
+                    "sn": (entry_value(entry, "sn") or "").strip(),
                 }
                 ad_by_emp[employee_id] = {
+                    "employeeID": employee_id,
                     "department": dept,
                     "manager_dn": manager_dn,
+                    "displayName": (entry_value(entry, "displayName") or "").strip(),
+                    "title": (entry_value(entry, "title") or "").strip(),
+                    "givenName": (entry_value(entry, "givenName") or "").strip(),
+                    "sn": (entry_value(entry, "sn") or "").strip(),
                 }
                 if manager_dn:
                     manager_dns.add(manager_dn)
@@ -116,7 +133,7 @@ def fetch_ad_user_maps():
                     search_base=manager_dn,
                     search_filter="(objectClass=*)",
                     search_scope=BASE,
-                    attributes=["displayName", "department", "employeeID"],
+                    attributes=["displayName", "department", "employeeID", "title", "givenName", "sn"],
                 )
                 if conn.entries:
                     entry = conn.entries[0]
@@ -124,18 +141,27 @@ def fetch_ad_user_maps():
                         "displayName": (entry_value(entry, "displayName") or "").strip(),
                         "department": (entry_value(entry, "department") or "").strip(),
                         "employeeID": normalize_id(entry_value(entry, "employeeID") or ""),
+                        "title": (entry_value(entry, "title") or "").strip(),
+                        "givenName": (entry_value(entry, "givenName") or "").strip(),
+                        "sn": (entry_value(entry, "sn") or "").strip(),
                     }
                 else:
                     dn_details[manager_dn] = {
                         "displayName": "",
                         "department": "",
                         "employeeID": "",
+                        "title": "",
+                        "givenName": "",
+                        "sn": "",
                     }
             except Exception:
                 dn_details[manager_dn] = {
                     "displayName": "",
                     "department": "",
                     "employeeID": "",
+                    "title": "",
+                    "givenName": "",
+                    "sn": "",
                 }
     finally:
         conn.unbind()
@@ -156,23 +182,33 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
         person = emp.get("person", {})
         first, last = function_app.get_first_last(person)
         full_name = f"{first} {last}".strip()
-        title = function_app.extract_business_title(emp) or function_app.extract_assignment_field(emp, "jobTitle") or ""
+        proposed_title = function_app.extract_business_title(emp) or function_app.extract_assignment_field(emp, "jobTitle") or ""
 
         ad_record = ad_by_emp.get(emp_id)
+        current_employee_id = (ad_record or {}).get("employeeID", "")
+        current_full_name = (ad_record or {}).get("displayName", "")
+        current_given_name = (ad_record or {}).get("givenName", "")
+        current_surname = (ad_record or {}).get("sn", "")
+        current_title = (ad_record or {}).get("title", "")
         current_dept = (ad_record or {}).get("department", "")
-        manager_dn = (ad_record or {}).get("manager_dn", "")
+        current_manager_dn = (ad_record or {}).get("manager_dn", "")
 
-        manager_name = ""
-        manager_department = ""
-        if manager_dn:
-            mgr = dn_details.get(manager_dn, {})
-            manager_name = (mgr.get("displayName") or "").strip()
-            manager_department = (mgr.get("department") or "").strip()
+        current_manager_name = ""
+        current_manager_department = ""
+        if current_manager_dn:
+            mgr = dn_details.get(current_manager_dn, {})
+            current_manager_name = (mgr.get("displayName") or "").strip()
+            current_manager_department = (mgr.get("department") or "").strip()
+
+        proposed_manager_id = normalize_id(function_app.extract_manager_id(emp) or "")
+        proposed_manager_record = ad_by_emp.get(proposed_manager_id, {})
+        proposed_manager_name = (proposed_manager_record.get("displayName") or "").strip()
+        proposed_manager_department = (proposed_manager_record.get("department") or "").strip()
 
         resolution = function_app.resolve_local_ac_department(
             emp,
             current_ad_department=current_dept,
-            manager_department=manager_department,
+            manager_department=current_manager_department,
         )
         proposed_v2 = (resolution.get("proposedDepartmentV2") or "").strip()
         proposed_legacy = proposed_v2
@@ -188,11 +224,25 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
         rows.append(
             {
                 "employeeID": emp_id,
+                "currentEmployeeID": current_employee_id,
+                "proposedEmployeeID": emp_id,
                 "fullName": full_name,
-                "title": title,
+                "currentFullName": current_full_name,
+                "proposedFullName": full_name,
+                "currentGivenName": current_given_name,
+                "proposedGivenName": first,
+                "currentSurname": current_surname,
+                "proposedSurname": last,
+                "title": proposed_title,
+                "currentTitle": current_title,
+                "proposedTitle": proposed_title,
                 "currentADDepartment": current_dept,
-                "userManager": manager_name,
-                "managerDepartment": manager_department,
+                "userManager": current_manager_name,
+                "managerDepartment": current_manager_department,
+                "currentManager": current_manager_name,
+                "proposedManager": proposed_manager_name,
+                "currentManagerDept": current_manager_department,
+                "proposedManagerDept": proposed_manager_department,
                 "proposedDepartmentFromScheduledUpdate": proposed_legacy,
                 "proposedDepartmentV2": proposed_v2,
                 "changeAllowed": str(bool(resolution.get("changeAllowed"))).lower(),
@@ -228,11 +278,25 @@ def main() -> None:
     output_csv = Path("adp_active_users_ad_current_vs_scheduled_department.csv")
     fieldnames = [
         "employeeID",
+        "currentEmployeeID",
+        "proposedEmployeeID",
         "fullName",
+        "currentFullName",
+        "proposedFullName",
+        "currentGivenName",
+        "proposedGivenName",
+        "currentSurname",
+        "proposedSurname",
         "title",
+        "currentTitle",
+        "proposedTitle",
         "currentADDepartment",
         "userManager",
         "managerDepartment",
+        "currentManager",
+        "proposedManager",
+        "currentManagerDept",
+        "proposedManagerDept",
         "proposedDepartmentFromScheduledUpdate",
         "proposedDepartmentV2",
         "changeAllowed",
@@ -255,6 +319,26 @@ def main() -> None:
     summary = {
         "totalEmployeesFromADP": len(adp_employees),
         "activeUsers": len(rows),
+        "employeeIDWouldChangeCount": sum(
+            1
+            for row in rows
+            if (row["currentEmployeeID"] or "").strip().lower() != (row["proposedEmployeeID"] or "").strip().lower()
+        ),
+        "nameWouldChangeCount": sum(
+            1
+            for row in rows
+            if (row["currentFullName"] or "").strip().lower() != (row["proposedFullName"] or "").strip().lower()
+        ),
+        "titleWouldChangeCount": sum(
+            1
+            for row in rows
+            if (row["currentTitle"] or "").strip().lower() != (row["proposedTitle"] or "").strip().lower()
+        ),
+        "managerWouldChangeCount": sum(
+            1
+            for row in rows
+            if (row["currentManager"] or "").strip().lower() != (row["proposedManager"] or "").strip().lower()
+        ),
         "departmentWouldChangeCount": sum(1 for row in rows if row["departmentWouldChange"] == "yes"),
         "missingInADOrNoDeptCount": sum(1 for row in rows if row["missingInADOrNoDept"] == "yes"),
         "blockedChangeCount": sum(1 for row in rows if row["changeAllowed"] == "false"),
