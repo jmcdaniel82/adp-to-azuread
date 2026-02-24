@@ -369,6 +369,7 @@ _LOCAL_AC_DEPT_PRIORITY = [
 ]
 
 _LOCAL_AC_FIELD_WEIGHTS = {
+    "costCenterDescription": 105,
     "assignedDept": 100,
     "homeDept": 95,
     "occupationalClassifications": 85,
@@ -540,7 +541,7 @@ def _is_ambiguous_reference_value(value: str) -> bool:
 
 def _confidence_for_source(source: str, explicit_canonical: bool) -> str:
     """Map a source to confidence level."""
-    if source in {"assignedDept", "homeDept"}:
+    if source in {"costCenterDescription", "assignedDept", "homeDept"}:
         return "HIGH"
     if source in {"managerDepartment", "titleInference"}:
         return "MED"
@@ -559,7 +560,7 @@ def _confidence_label(rank: int) -> str:
 
 def _is_customer_service_assigned_dept(source: str, value: str) -> bool:
     """Detect the customer service assignedDept override case."""
-    if source != "assignedDept":
+    if source not in {"assignedDept", "costCenterDescription"}:
         return False
     return _normalize_dept_signal(value).startswith("customer service")
 
@@ -736,7 +737,7 @@ def _admin_assignment_allowed(signals: list, manager_department: str, title_info
     if normalize_department_name(manager_department) == "Administration":
         return True
     for source, value in signals:
-        if source in {"assignedDept", "homeDept"} and _is_explicit_admin_assigned_dept(value):
+        if source in {"costCenterDescription", "assignedDept", "homeDept"} and _is_explicit_admin_assigned_dept(value):
             return True
     if title_info.get("isStrongAdmin"):
         return True
@@ -1040,6 +1041,16 @@ def _collect_local_ac_department_signals(emp):
                     or ""
                 )
             add(source, val)
+            if expected_type == "department":
+                cost_center_desc = ""
+                if isinstance(name_code, dict):
+                    cost_center_desc = (
+                        name_code.get("longName")
+                        or name_code.get("shortName")
+                        or name_code.get("name")
+                        or ""
+                    )
+                add("costCenterDescription", cost_center_desc)
 
     add_org_units(assignment.get("assignedOrganizationalUnits", []), "assignedDept", "department")
     add_org_units(assignment.get("homeOrganizationalUnits", []), "homeDept", "department")

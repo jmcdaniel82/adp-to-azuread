@@ -121,16 +121,25 @@ def _make_emp(first, last):
 
 def _make_department_emp(
     assigned_dept=None,
+    assigned_dept_code=None,
+    assigned_dept_long_name=None,
     occ_values=None,
     job_title="",
     business_title="",
 ):
     assigned_units = []
-    if assigned_dept:
+    if assigned_dept or assigned_dept_code or assigned_dept_long_name:
+        name_code = {}
+        if assigned_dept:
+            name_code["shortName"] = assigned_dept
+        if assigned_dept_code:
+            name_code["codeValue"] = assigned_dept_code
+        if assigned_dept_long_name:
+            name_code["longName"] = assigned_dept_long_name
         assigned_units.append(
             {
                 "typeCode": {"codeValue": "Department"},
-                "nameCode": {"shortName": assigned_dept},
+                "nameCode": name_code,
             }
         )
     occ = []
@@ -359,4 +368,26 @@ def test_administration_requires_gating_from_title_or_manager_or_assigned_dept()
     ambiguous_emp = _make_department_emp(occ_values=["Professionals"])
     ambiguous_result = resolve_local_ac_department(ambiguous_emp)
     assert normalize_department_name(ambiguous_result["proposedDepartmentV2"]) != "Administration"
+
+
+def test_cost_center_description_can_drive_department_mapping():
+    emp = _make_department_emp(
+        assigned_dept="491650",
+        assigned_dept_code="491650",
+        assigned_dept_long_name="Distribution - Charlotte DL",
+    )
+    result = resolve_local_ac_department(emp)
+    assert normalize_department_name(result["proposedDepartmentV2"]) == "Supply Chain"
+    assert result["departmentChangeReferenceField"] == "costCenterDescription"
+
+
+def test_cost_center_description_customer_service_maps_to_sales():
+    emp = _make_department_emp(
+        assigned_dept="720670",
+        assigned_dept_code="720670",
+        assigned_dept_long_name="Customer Service - Salary",
+    )
+    result = resolve_local_ac_department(emp)
+    assert normalize_department_name(result["proposedDepartmentV2"]) == "Sales"
+    assert result["departmentChangeReferenceField"] == "costCenterDescription"
 
