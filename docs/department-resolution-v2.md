@@ -2,7 +2,7 @@
 
 This document describes the department proposal logic used by:
 
-- `scheduled_adp_update` in `function_app.py`
+- `scheduled_update_existing_users` in `function_app.py`
 - `generate_adp_current_vs_scheduled_department_report.py`
 
 ## Canonical Departments
@@ -23,6 +23,7 @@ Example: `Information Technology | Security` normalizes to `Information Technolo
 
 Candidates are built from multiple sources:
 
+- `costCenterDescription` from ADP department org-unit description (`nameCode.longName`, fallback `shortName`) (high confidence)
 - `assignedDept` / `homeDept` (high confidence)
 - `managerDepartment` (medium confidence when canonical)
 - title inference (`jobTitle` / business title) (medium confidence)
@@ -35,7 +36,7 @@ The resolver picks the best department by confidence first, score second, with a
 
 ### Customer Service override
 
-If `assignedDept` starts with `Customer Service` (case-insensitive), map to `Sales`.
+If `assignedDept` or `costCenterDescription` starts with `Customer Service` (case-insensitive), map to `Sales`.
 
 ### Ambiguous values
 
@@ -52,6 +53,7 @@ Ambiguous labels do not directly force `Administration`.
 
 `Administration` is allowed only with strong evidence:
 
+- cost center description explicitly admin-coded, or
 - assigned/home department explicitly admin-coded, or
 - manager department is Administration, or
 - title strongly indicates admin role (for example Administrative Assistant / Executive Assistant / Receptionist / Office Administrator / Office Manager / Administrative Services).
@@ -90,4 +92,5 @@ When chosen evidence is ambiguous or admin-gated:
 - `departmentChangeReasonTrace`
 
 These fields let you trace why each row was changed, blocked, or left unchanged.
+`departmentChangeReferenceField` may now be `costCenterDescription` when cost center description evidence drives the decision.
 The CSV/summary outputs are runtime artifacts and are not required as committed repo files.

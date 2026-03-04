@@ -4,8 +4,8 @@ This Azure Functions project syncs worker data from ADP Workforce Now into on-pr
 
 ## What It Does
 
-- Provisions new users from ADP (`scheduled_adp_sync` timer trigger).
-- Compares and updates existing AD users from ADP (`scheduled_adp_update`, dry run by default).
+- Provisions new users from ADP (`scheduled_provision_new_hires` timer trigger).
+- Compares and updates existing AD users from ADP (`scheduled_update_existing_users`, dry run by default).
 - Exposes HTTP endpoints for payload inspection and mapping diagnostics:
   - `POST /api/process`
   - `GET /api/export`

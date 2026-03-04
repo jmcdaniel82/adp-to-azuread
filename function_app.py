@@ -1625,11 +1625,11 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         logging.error(f"Password or enable failed for {dn}: {e}")
     return conn
 
-# ---- Scheduled sync every 15m ----
+# ---- Scheduled new-hire provisioning every 15m ----
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
-def scheduled_adp_sync(mytimer: func.TimerRequest):
+def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     """Timer triggered function that provisions recent hires."""
-    logging.info("🔄 scheduled_adp_sync triggered")
+    logging.info("🔄 scheduled_provision_new_hires triggered")
     if mytimer.past_due:
         logging.warning("Timer is past due!")
     token = get_adp_token()
@@ -1674,7 +1674,7 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
         f"(lookback_days={hire_lookback_days})"
     )
     if not employees_recent:
-        logging.info("🚫 Nothing to sync; exiting scheduled_adp_sync")
+        logging.info("🚫 Nothing to sync; exiting scheduled_provision_new_hires")
         return
     ldap_server = os.getenv("LDAP_SERVER")
     ldap_user = os.getenv("LDAP_USER")
@@ -1719,18 +1719,18 @@ def scheduled_adp_sync(mytimer: func.TimerRequest):
         try:
             new_conn = provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base, conn_factory)
             if not new_conn:
-                logging.error("LDAP connection unavailable; aborting scheduled_adp_sync")
+                logging.error("LDAP connection unavailable; aborting scheduled_provision_new_hires")
                 break
             conn = new_conn
         except Exception as e:
             logging.error(f"❌ Exception provisioning {emp_id}: {e}")
     conn.unbind()
-    logging.info("🔒 LDAP connection closed — scheduled_adp_sync complete")
+    logging.info("🔒 LDAP connection closed — scheduled_provision_new_hires complete")
 
 
-# ---- Scheduled update sync (dry run by default) ----
+# ---- Scheduled existing-user update (dry run by default) ----
 @app.schedule(schedule="0 0 * * * *", arg_name="mytimer", run_on_startup=False)
-def scheduled_adp_update(mytimer: func.TimerRequest):
+def scheduled_update_existing_users(mytimer: func.TimerRequest):
     """Timer triggered function that updates existing AD users from ADP (dry run by default)."""
     dry_run = _env_truthy("UPDATE_DRY_RUN", True)
     lookback_days_raw = os.getenv("UPDATE_LOOKBACK_DAYS", "7")
@@ -1741,7 +1741,7 @@ def scheduled_adp_update(mytimer: func.TimerRequest):
     include_missing_updates = _env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True)
     log_no_changes = _env_truthy("UPDATE_LOG_NO_CHANGES", False)
 
-    logging.info(f"🔁 scheduled_adp_update triggered (dry_run={dry_run}, lookback_days={lookback_days})")
+    logging.info(f"🔁 scheduled_update_existing_users triggered (dry_run={dry_run}, lookback_days={lookback_days})")
     token = get_adp_token()
     if not token:
         logging.error("❌ Failed to retrieve ADP token for update.")
@@ -1773,7 +1773,7 @@ def scheduled_adp_update(mytimer: func.TimerRequest):
         logging.info(f"ℹ️  {len(candidates)} ADP employees considered for update (no lookback filter)")
 
     if not candidates:
-        logging.info("🚫 Nothing to update; exiting scheduled_adp_update")
+        logging.info("🚫 Nothing to update; exiting scheduled_update_existing_users")
         return
 
     ldap_server = os.getenv("LDAP_SERVER")
@@ -1870,7 +1870,7 @@ def scheduled_adp_update(mytimer: func.TimerRequest):
         if not dry_run:
             conn = _apply_ldap_modifications(conn, dn, changes, conn_factory)
             if not conn:
-                logging.error("LDAP connection unavailable; aborting scheduled_adp_update")
+                logging.error("LDAP connection unavailable; aborting scheduled_update_existing_users")
                 break
 
     try:
@@ -1878,7 +1878,7 @@ def scheduled_adp_update(mytimer: func.TimerRequest):
     except Exception:
         pass
     logging.info(
-        f"🔒 LDAP connection closed — scheduled_adp_update complete "
+        f"🔒 LDAP connection closed — scheduled_update_existing_users complete "
         f"(users_with_changes={updated_users}, total_changes={total_changes}, missing_in_ad={missing_in_ad})"
     )
 

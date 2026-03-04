@@ -41,6 +41,33 @@ def entry_value(entry, attr_name: str):
     return attr.value
 
 
+def normalize_text(value: str) -> str:
+    """Normalize text for stable comparisons."""
+    return (value or "").strip().lower()
+
+
+def normalize_country(value: str) -> str:
+    """Normalize country names/codes for comparison."""
+    normalized = normalize_text(value)
+    aliases = {
+        "united states": "us",
+        "united states of america": "us",
+        "usa": "us",
+        "us": "us",
+        "u.s.": "us",
+        "mexico": "mx",
+        "méxico": "mx",
+        "mx": "mx",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def build_location_display(street: str, city: str, state: str, postal_code: str, country: str) -> str:
+    """Build a readable single-line location string."""
+    parts = [(street or "").strip(), (city or "").strip(), (state or "").strip(), (postal_code or "").strip(), (country or "").strip()]
+    return ", ".join(part for part in parts if part)
+
+
 def fetch_ad_user_maps():
     """Fetch AD users and manager metadata used by the report."""
     ldap_server = os.getenv("LDAP_SERVER")
@@ -85,6 +112,11 @@ def fetch_ad_user_maps():
                     "title",
                     "givenName",
                     "sn",
+                    "l",
+                    "st",
+                    "streetAddress",
+                    "postalCode",
+                    "co",
                 ],
                 paged_size=page_size,
                 paged_cookie=cookie,
@@ -112,6 +144,11 @@ def fetch_ad_user_maps():
                     "title": (entry_value(entry, "title") or "").strip(),
                     "givenName": (entry_value(entry, "givenName") or "").strip(),
                     "sn": (entry_value(entry, "sn") or "").strip(),
+                    "l": (entry_value(entry, "l") or "").strip(),
+                    "st": (entry_value(entry, "st") or "").strip(),
+                    "streetAddress": (entry_value(entry, "streetAddress") or "").strip(),
+                    "postalCode": (entry_value(entry, "postalCode") or "").strip(),
+                    "co": (entry_value(entry, "co") or "").strip(),
                 }
                 if manager_dn:
                     manager_dns.add(manager_dn)
@@ -192,6 +229,11 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
         current_title = (ad_record or {}).get("title", "")
         current_dept = (ad_record or {}).get("department", "")
         current_manager_dn = (ad_record or {}).get("manager_dn", "")
+        current_city = (ad_record or {}).get("l", "")
+        current_state = (ad_record or {}).get("st", "")
+        current_street = (ad_record or {}).get("streetAddress", "")
+        current_postal_code = (ad_record or {}).get("postalCode", "")
+        current_country = (ad_record or {}).get("co", "")
 
         current_manager_name = ""
         current_manager_department = ""
@@ -204,6 +246,26 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
         proposed_manager_record = ad_by_emp.get(proposed_manager_id, {})
         proposed_manager_name = (proposed_manager_record.get("displayName") or "").strip()
         proposed_manager_department = (proposed_manager_record.get("department") or "").strip()
+        proposed_city = function_app.extract_work_address_field(emp, "cityName") or function_app.extract_work_address_field(emp, "city") or ""
+        proposed_state = function_app.extract_state_from_work(emp) or ""
+        proposed_street = function_app.extract_work_address_field(emp, "lineOne") or function_app.extract_work_address_field(emp, "line1") or ""
+        proposed_postal_code = function_app.extract_work_address_field(emp, "postalCode") or ""
+        proposed_country = function_app.extract_work_address_field(emp, "countryCode") or ""
+
+        current_location = build_location_display(
+            current_street,
+            current_city,
+            current_state,
+            current_postal_code,
+            current_country,
+        )
+        proposed_location = build_location_display(
+            proposed_street,
+            proposed_city,
+            proposed_state,
+            proposed_postal_code,
+            proposed_country,
+        )
 
         resolution = function_app.resolve_local_ac_department(
             emp,
@@ -220,6 +282,18 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
             current_cmp = function_app.normalize_department_name(current_dept)
             proposed_cmp = function_app.normalize_department_name(proposed_v2)
             department_would_change = "yes" if current_cmp != proposed_cmp else "no"
+        if not ad_record:
+            location_would_change = "no"
+        else:
+            location_would_change = "yes" if any(
+                [
+                    normalize_text(current_city) != normalize_text(proposed_city),
+                    normalize_text(current_state) != normalize_text(proposed_state),
+                    normalize_text(current_street) != normalize_text(proposed_street),
+                    normalize_text(current_postal_code) != normalize_text(proposed_postal_code),
+                    normalize_country(current_country) != normalize_country(proposed_country),
+                ]
+            ) else "no"
 
         rows.append(
             {
@@ -236,6 +310,19 @@ def build_rows(adp_employees, ad_by_emp, dn_details):
                 "title": proposed_title,
                 "currentTitle": current_title,
                 "proposedTitle": proposed_title,
+                "currentStreetAddress": current_street,
+                "proposedStreetAddress": proposed_street,
+                "currentCity": current_city,
+                "proposedCity": proposed_city,
+                "currentState": current_state,
+                "proposedState": proposed_state,
+                "currentPostalCode": current_postal_code,
+                "proposedPostalCode": proposed_postal_code,
+                "currentCountry": current_country,
+                "proposedCountry": proposed_country,
+                "currentLocation": current_location,
+                "proposedLocation": proposed_location,
+                "locationWouldChange": location_would_change,
                 "currentADDepartment": current_dept,
                 "userManager": current_manager_name,
                 "managerDepartment": current_manager_department,
@@ -290,6 +377,19 @@ def main() -> None:
         "title",
         "currentTitle",
         "proposedTitle",
+        "currentStreetAddress",
+        "proposedStreetAddress",
+        "currentCity",
+        "proposedCity",
+        "currentState",
+        "proposedState",
+        "currentPostalCode",
+        "proposedPostalCode",
+        "currentCountry",
+        "proposedCountry",
+        "currentLocation",
+        "proposedLocation",
+        "locationWouldChange",
         "currentADDepartment",
         "userManager",
         "managerDepartment",
@@ -334,6 +434,7 @@ def main() -> None:
             for row in rows
             if (row["currentTitle"] or "").strip().lower() != (row["proposedTitle"] or "").strip().lower()
         ),
+        "locationWouldChangeCount": sum(1 for row in rows if row["locationWouldChange"] == "yes"),
         "managerWouldChangeCount": sum(
             1
             for row in rows
