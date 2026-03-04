@@ -7,7 +7,6 @@ import ssl
 import secrets
 import string
 import tempfile  # used to write PEM content to a temporary file
-import time      # used for small backoff between bind retries
 import base64    # used to decode base64-encoded certificates or keys
 import certifi   # fallback CA bundle provider
 import azure.functions as func
@@ -1458,19 +1457,26 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     emp_id = extract_employee_id(user_data)
     hire_date = get_hire_date(user_data) or "<no hire date>"
 
-    # Search the entire domain for the employeeID to prevent creating duplicates
-    conn.search(ldap_search_base,
-                f"(employeeID={emp_id})",
-                SUBTREE,
-                attributes=["employeeID", "distinguishedName"])
-    if conn.entries:
-        logging.info(f"User already exists: {emp_id} at {conn.entries[0].distinguishedName.value}")
+    def find_existing_user_dn(connection, employee_id: str) -> Optional[str]:
+        """Return DN for an existing employeeID match, if present."""
+        connection.search(
+            ldap_search_base,
+            f"(employeeID={employee_id})",
+            SUBTREE,
+            attributes=["employeeID", "distinguishedName"],
+        )
+        if connection.entries:
+            return connection.entries[0].distinguishedName.value
+        return None
+
+    existing_dn = find_existing_user_dn(conn, emp_id)
+    if existing_dn:
+        logging.info(f"User already exists: {emp_id} at {existing_dn}")
         # If user exists, update manager if needed
         manager_id = extract_manager_id(user_data)
         manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
         if manager_dn:
-            conn.modify(conn.entries[0].distinguishedName.value,
-                        {"manager": [(MODIFY_REPLACE, [manager_dn])]})
+            conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
         return conn
 
     # Build attributes for new user
@@ -1514,10 +1520,6 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     }
     dn = None
     attempt = 0
-    bind_retries = 0
-    max_bind_retries = 3
-    reconnect_attempts = 0
-    max_reconnect_attempts = 2
     while attempt < 50:
         if hasattr(conn, "bound") and not conn.bound:
             try:
@@ -1555,60 +1557,56 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
             continue
         if result.get("result") == 19:
             if "userPrincipalName" in msg or "sAMAccountName" in msg:
-                logging.warning(f"Add failed for {dn_candidate} (constraintViolation on account id); retrying with suffix")
-                attempt += 1
-                continue
-            logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
-            return conn
-        if result.get("result") == 1 and "successful bind must be completed" in msg:
-            logging.warning(f"Bind lost details: {_format_ldap_error(conn)}")
-            if bind_retries >= max_bind_retries:
-                if conn_factory and reconnect_attempts < max_reconnect_attempts:
-                    logging.warning(f"Add failed for {dn_candidate} after {max_bind_retries} rebinds; reconnecting")
-                    reconnect_attempts += 1
+                logging.warning(f"Add failed for {dn_candidate} (constraintViolation on account id); refreshing connection and retrying with suffix")
+                if conn_factory:
                     try:
                         try:
                             conn.unbind()
                         except Exception:
                             pass
                         conn = conn_factory()
-                        bind_retries = 0
-                        time.sleep(0.5)
-                        continue
-                    except Exception as e:
-                        logging.error(f"Reconnect failed after bind loss: {e}")
-                        return conn
-                logging.error(f"Add failed for {dn_candidate}: bind lost after {max_bind_retries} retries")
-                return conn
-            logging.warning(f"Add failed for {dn_candidate} (bind lost); rebinding and retrying")
-            bind_retries += 1
-            try:
-                if not conn.rebind():
-                    logging.error(f"Rebind failed after bind-lost error: {_format_ldap_error(conn)}")
-                    if conn_factory and reconnect_attempts < max_reconnect_attempts:
-                        reconnect_attempts += 1
-                        logging.warning(f"Attempting reconnect after rebind failure (attempt {reconnect_attempts})")
-                        try:
-                            try:
-                                conn.unbind()
-                            except Exception:
-                                pass
-                            conn = conn_factory()
-                            bind_retries = 0
-                            time.sleep(0.5)
-                            continue
-                        except Exception as e:
-                            logging.error(f"Reconnect failed after rebind failure: {e}")
+                        existing_dn = find_existing_user_dn(conn, emp_id)
+                        if existing_dn:
+                            logging.info(f"User found after reconnect: {emp_id} at {existing_dn}; skipping add")
+                            manager_id = extract_manager_id(user_data)
+                            manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+                            if manager_dn:
+                                conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
                             return conn
+                    except Exception as e:
+                        logging.error(f"Reconnect failed after account-id constraint for {dn_candidate}: {e}")
+                        return conn
+                attempt += 1
+                continue
+            logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
+            return conn
+        if result.get("result") == 1 and "successful bind must be completed" in msg:
+            logging.warning(f"Bind lost details: {_format_ldap_error(conn)}")
+            if conn_factory:
+                logging.warning(f"Add failed for {dn_candidate} (bind lost); reconnecting and skipping current user")
+                try:
+                    try:
+                        conn.unbind()
+                    except Exception:
+                        pass
+                    conn = conn_factory()
+                    existing_dn = find_existing_user_dn(conn, emp_id)
+                    if existing_dn:
+                        logging.info(f"User found after bind-loss reconnect: {emp_id} at {existing_dn}")
+                        manager_id = extract_manager_id(user_data)
+                        manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+                        if manager_dn:
+                            conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
+                    else:
+                        logging.error(f"Skipping {emp_id} after bind-lost add; fresh connection ready for next user")
                     return conn
-            except Exception as e:
-                logging.error(f"Rebind failed after bind-lost error: {e}")
-                return conn
-            time.sleep(0.5)
-            continue
+                except Exception as e:
+                    logging.error(f"Reconnect failed after bind-lost error for {dn_candidate}: {e}")
+                    return conn
+            logging.error(f"Add failed for {dn_candidate}: bind lost and no conn_factory available")
+            return conn
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
         return conn
-        attempt += 1
     if not dn:
         logging.error(f"Add failed for base CN '{full_name}': exceeded unique CN attempts")
         return conn
