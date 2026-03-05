@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import socket
+import time
 import requests
 import ssl
 import secrets
@@ -15,9 +16,60 @@ from ldap3 import BASE, Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Optional, Any
 
 app = func.FunctionApp()
+
+# Runtime overview for reviewers:
+# 1) Timer jobs pull workers from ADP and then either provision or update AD users via LDAPS.
+# 2) HTTP routes expose diagnostic payloads for department mapping/export verification.
+# 3) Department mapping logic is centralized in resolve_local_ac_department() and reused by update paths.
+
+# HTTP/LDAP retry and timeout defaults for outbound network calls.
+ADP_HTTP_TIMEOUT_SECONDS = 10
+ADP_HTTP_MAX_RETRIES = 3
+ADP_HTTP_BACKOFF_SECONDS = 0.75
+
+# LDAP attribute constants to keep mapping and guardrails explicit.
+ATTR_CN = "cn"
+ATTR_SN = "sn"
+ATTR_GIVEN_NAME = "givenName"
+ATTR_DISPLAY_NAME = "displayName"
+ATTR_EMPLOYEE_ID = "employeeID"
+ATTR_USER_PRINCIPAL_NAME = "userPrincipalName"
+ATTR_MAIL = "mail"
+ATTR_MAIL_NICKNAME = "mailNickname"
+ATTR_PROXY_ADDRESSES = "proxyAddresses"
+ATTR_TARGET_ADDRESS = "targetAddress"
+ATTR_SAM_ACCOUNT_NAME = "sAMAccountName"
+
+# Email-routing identifiers are create-time only and must never be touched by update sync.
+EMAIL_IDENTIFIER_UPDATE_DENYLIST = {
+    ATTR_MAIL.lower(),
+    ATTR_USER_PRINCIPAL_NAME.lower(),
+    ATTR_MAIL_NICKNAME.lower(),
+    ATTR_PROXY_ADDRESSES.lower(),
+    ATTR_TARGET_ADDRESS.lower(),
+    "othermailbox",
+    "msrtcsip-primaryuseraddress",
+}
+
+# Update search intentionally excludes email-routing attributes.
+AD_UPDATE_SEARCH_ATTRIBUTES = [
+    "distinguishedName",
+    ATTR_EMPLOYEE_ID,
+    ATTR_DISPLAY_NAME,
+    "title",
+    "department",
+    "company",
+    "l",
+    "st",
+    "postalCode",
+    "streetAddress",
+    "co",
+    "manager",
+    "userAccountControl",
+]
 
 # ---- Certificate and CA bundle helpers ----
 
@@ -119,6 +171,56 @@ def _log_ldap_target_details(context: str, host: str, ca_bundle: str, port: int 
     except Exception as e:
         logging.warning(f"{context} LDAP DNS resolution failed for '{host}': {e}")
 
+
+def _request_with_retries(
+    method: str,
+    url: str,
+    *,
+    action_label: str,
+    max_attempts: int = ADP_HTTP_MAX_RETRIES,
+    timeout: int = ADP_HTTP_TIMEOUT_SECONDS,
+    retryable_statuses: Optional[set[int]] = None,
+    **kwargs: Any,
+) -> Optional[Any]:
+    """
+    Execute an HTTP request with bounded retries and exponential backoff.
+
+    Retries are attempted for transient transport exceptions and retryable HTTP
+    statuses (429/5xx by default). Non-retryable responses are returned
+    immediately for caller-side handling.
+    """
+    retryable = retryable_statuses or {429, 500, 502, 503, 504}
+    delay = ADP_HTTP_BACKOFF_SECONDS
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.request(method, url, timeout=timeout, **kwargs)
+        except requests.RequestException as e:
+            if attempt >= max_attempts:
+                logging.error(f"{action_label} failed after {attempt} attempts: {e}")
+                return None
+            logging.warning(f"{action_label} transport error (attempt {attempt}/{max_attempts}): {e}; retrying")
+            time.sleep(delay)
+            delay *= 2
+            continue
+
+        if response.status_code in retryable:
+            if attempt >= max_attempts:
+                logging.error(
+                    f"{action_label} failed after {attempt} attempts with HTTP {response.status_code}: "
+                    f"{response.text}"
+                )
+                return None
+            logging.warning(
+                f"{action_label} received retryable HTTP {response.status_code} "
+                f"(attempt {attempt}/{max_attempts}); retrying"
+            )
+            time.sleep(delay)
+            delay *= 2
+            continue
+
+        return response
+    return None
+
 # ---- Helper functions ----
 
 def parse_datetime(value: str, context: str) -> Optional[datetime]:
@@ -187,8 +289,9 @@ def get_adp_token() -> Optional[str]:
     pem_path = ensure_file_from_env('ADP_CERT_PEM', '.pem')
     key_path = ensure_file_from_env('ADP_CERT_KEY', '.key')
 
-    if not token_url or not client_id or not client_secret:
-        logging.error("Missing ADP_TOKEN_URL, ADP_CLIENT_ID, or ADP_CLIENT_SECRET environment variables.")
+    missing = _missing_env_vars(["ADP_TOKEN_URL", "ADP_CLIENT_ID", "ADP_CLIENT_SECRET"])
+    if missing:
+        logging.error(f"Missing ADP token configuration: {', '.join(missing)}")
         return None
     if not pem_path:
         logging.error("ADP_CERT_PEM environment variable is missing or invalid.")
@@ -208,20 +311,30 @@ def get_adp_token() -> Optional[str]:
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     verify_arg = get_adp_ca_bundle()
-    try:
-        resp = requests.post(
-            token_url,
-            headers=headers,
-            data=payload,
-            cert=client_cert,
-            verify=verify_arg,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json().get("access_token")
-    except Exception as e:
-        logging.error(f"ADP token retrieval failed: {e}")
+    resp = _request_with_retries(
+        "POST",
+        token_url,
+        action_label="ADP token request",
+        headers=headers,
+        data=payload,
+        cert=client_cert,
+        verify=verify_arg,
+    )
+    if not resp:
         return None
+    if not resp.ok:
+        logging.error(f"ADP token request failed (HTTP {resp.status_code}): {resp.text}")
+        return None
+    try:
+        body = resp.json()
+    except json.JSONDecodeError:
+        logging.error(f"ADP token response was not JSON: {resp.text}")
+        return None
+    token = body.get("access_token")
+    if not token:
+        logging.error(f"ADP token response missing access_token. Keys={list(body.keys())}")
+        return None
+    return token
 
 
 def get_hire_date(employee):
@@ -276,17 +389,54 @@ def extract_employee_id(emp):
     return w or ""
 
 
-def get_first_last(person):
-    """Return (first, last) preferring preferredName, else legalName."""
-    pref = person.get("preferredName", {})
-    first = pref.get("givenName")
-    last = pref.get("familyName1")
-    if first and last:
-        return first, last
+def _clean_name_part(value: Any) -> str:
+    """Normalize a name part to a stripped string."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def get_legal_first_last(person: dict) -> tuple[str, str]:
+    """Return legal first/last name from ADP person payload."""
+    if not isinstance(person, dict):
+        return "", ""
     legal = person.get("legalName", {})
-    first = legal.get("givenName", "")
-    last = legal.get("familyName1", "")
+    if not isinstance(legal, dict):
+        return "", ""
+    first = _clean_name_part(legal.get("givenName"))
+    last = _clean_name_part(legal.get("familyName1"))
     return first, last
+
+
+def get_preferred_first_last(person: dict) -> tuple[str, str]:
+    """Return preferred first/last name from ADP person payload, if present."""
+    if not isinstance(person, dict):
+        return "", ""
+    preferred = person.get("preferredName", {})
+    if not isinstance(preferred, dict):
+        return "", ""
+    first = _clean_name_part(preferred.get("givenName"))
+    last = _clean_name_part(preferred.get("familyName1"))
+    return first, last
+
+
+def get_display_name(person: dict) -> str:
+    """Return preferred full name when complete, otherwise legal full name."""
+    preferred_first, preferred_last = get_preferred_first_last(person)
+    if preferred_first and preferred_last:
+        return f"{preferred_first} {preferred_last}".strip()
+    legal_first, legal_last = get_legal_first_last(person)
+    return f"{legal_first} {legal_last}".strip()
+
+
+def get_first_last(person):
+    """
+    Backward-compatible name helper.
+
+    Returns legal first/last only. New code should call get_legal_first_last()
+    or get_preferred_first_last() explicitly based on intent.
+    """
+    return get_legal_first_last(person)
 
 
 def sanitize_string_for_sam(s):
@@ -297,13 +447,15 @@ def sanitize_string_for_sam(s):
 def extract_assignment_field(emp, field):
     """Return a value from the employee's first work assignment."""
     wa = emp.get("workAssignments", [])
-    return wa[0].get(field, "") if wa else ""
+    if not wa or not isinstance(wa[0], dict):
+        return ""
+    return wa[0].get(field, "")
 
 
 def extract_department(emp):
     """Retrieve the department short name from work assignments."""
     wa = emp.get("workAssignments", [])
-    if not wa:
+    if not wa or not isinstance(wa[0], dict):
         return ""
     candidates = []
     occ = wa[0].get("occupationalClassifications", [])
@@ -332,15 +484,26 @@ def extract_department(emp):
     if _env_truthy("LOG_DEPARTMENT_SOURCE", False):
         emp_id = extract_employee_id(emp)
         person = emp.get("person", {})
-        first, last = get_first_last(person)
-        name = f"{first} {last}".strip() or "<no name>"
-        logging.info(f"Department source for {emp_id} / {name}: {source} -> {value}")
+        legal_first, legal_last = get_legal_first_last(person)
+        display_name = get_display_name(person) or "<no display name>"
+        legal_name = f"{legal_first} {legal_last}".strip() or "<no legal name>"
+        logging.info(
+            f"Department source for {emp_id} / display='{display_name}' legal='{legal_name}': "
+            f"{source} -> {value}"
+        )
     return value
 
 def extract_business_title(emp):
-    """Extracts the Business Title from the customFieldGroup."""
-    custom_fields = emp.get("customFieldGroup", {}).get("stringFields", [])
+    """Extract the Business Title value from custom fields."""
+    custom_group = emp.get("customFieldGroup", {})
+    if not isinstance(custom_group, dict):
+        return None
+    custom_fields = custom_group.get("stringFields", [])
+    if not isinstance(custom_fields, list):
+        return None
     for field in custom_fields:
+        if not isinstance(field, dict):
+            continue
         if field.get("nameCode", {}).get("codeValue") == "Business Title":
             return field.get("stringValue")
     return None
@@ -348,7 +511,7 @@ def extract_business_title(emp):
 def extract_company(emp):
     """Retrieve the company or business unit name from work assignments."""
     wa = emp.get("workAssignments", [])
-    if not wa:
+    if not wa or not isinstance(wa[0], dict):
         return ""
     bu = wa[0].get("businessUnit", {})
     if isinstance(bu, dict) and bu.get("name"):
@@ -695,6 +858,7 @@ def _map_signal_candidates(source: str, raw_value: str) -> list:
         rule_weight: int = 0,
         is_direct: bool = False,
     ):
+        """Append a unique candidate for a signal, skipping ambiguous admin noise."""
         if department == "Administration" and _is_ambiguous_reference_value(raw_value):
             return
         key = (department, source, reason)
@@ -1029,6 +1193,7 @@ def _collect_local_ac_department_signals(emp):
     seen = set()
 
     def add(source: str, value: str):
+        """Record one non-empty signal while deduplicating repeated values."""
         raw_val = (value or "").strip()
         if not raw_val:
             return
@@ -1045,6 +1210,7 @@ def _collect_local_ac_department_signals(emp):
     assignment = wa[0]
 
     def add_org_units(units, source: str, expected_type: str):
+        """Pull organizational-unit names and optional cost-center descriptions."""
         if not isinstance(units, list):
             return
         for ou in units:
@@ -1121,42 +1287,56 @@ def map_local_ac_department(
 def extract_work_address_field(emp, field):
     """Return a specific address field from the assigned work location."""
     wa = emp.get("workAssignments", [])
-    if wa:
+    if wa and isinstance(wa[0], dict):
         addr = {}
-        if wa[0].get("assignedWorkLocations"):
-            addr = wa[0]["assignedWorkLocations"][0].get("address", {})
-            val = addr.get(field, "")
+        assigned_locations = wa[0].get("assignedWorkLocations")
+        if isinstance(assigned_locations, list) and assigned_locations:
+            first_location = assigned_locations[0] if isinstance(assigned_locations[0], dict) else {}
+            addr = first_location.get("address", {}) if isinstance(first_location, dict) else {}
+            val = addr.get(field, "") if isinstance(addr, dict) else ""
             if val:
                 return val
-        if wa[0].get("homeWorkLocation"):
-            addr = wa[0]["homeWorkLocation"].get("address", {})
-            return addr.get(field, "")
+        home_location = wa[0].get("homeWorkLocation")
+        if isinstance(home_location, dict):
+            addr = home_location.get("address", {})
+            if isinstance(addr, dict):
+                return addr.get(field, "")
     return ""
 
 
 def extract_state_from_work(emp):
     """Return the state or province code from the work address."""
     wa = emp.get("workAssignments", [])
-    if wa:
+    if wa and isinstance(wa[0], dict):
         cs = {}
-        if wa[0].get("assignedWorkLocations"):
-            cs = wa[0]["assignedWorkLocations"][0].get("address", {}).get("countrySubdivisionLevel1", {})
-            val = cs.get("codeValue", "")
+        assigned_locations = wa[0].get("assignedWorkLocations")
+        if isinstance(assigned_locations, list) and assigned_locations:
+            first_location = assigned_locations[0] if isinstance(assigned_locations[0], dict) else {}
+            address = first_location.get("address", {}) if isinstance(first_location, dict) else {}
+            cs = address.get("countrySubdivisionLevel1", {}) if isinstance(address, dict) else {}
+            val = cs.get("codeValue", "") if isinstance(cs, dict) else ""
             if val:
                 return val
-        if wa[0].get("homeWorkLocation"):
-            cs = wa[0]["homeWorkLocation"].get("address", {}).get("countrySubdivisionLevel1", {})
-            return cs.get("codeValue", "")
+        home_location = wa[0].get("homeWorkLocation")
+        if isinstance(home_location, dict):
+            address = home_location.get("address", {})
+            if isinstance(address, dict):
+                cs = address.get("countrySubdivisionLevel1", {})
+                if isinstance(cs, dict):
+                    return cs.get("codeValue", "")
     return ""
 
 
 def extract_manager_id(emp):
     """Return the ADP associateOID of the employee's manager."""
     wa = emp.get("workAssignments", [])
-    if wa:
-        reports_to = wa[0].get("reportsTo", [{}])[0]
-        manager_info = reports_to.get("workerID", {})
-        return manager_info.get("idValue")
+    if wa and isinstance(wa[0], dict):
+        reports_to = wa[0].get("reportsTo", [])
+        if isinstance(reports_to, list) and reports_to:
+            first_report = reports_to[0] if isinstance(reports_to[0], dict) else {}
+            manager_info = first_report.get("workerID", {}) if isinstance(first_report, dict) else {}
+            if isinstance(manager_info, dict):
+                return manager_info.get("idValue")
     return None
 
 
@@ -1164,10 +1344,18 @@ def get_manager_dn(conn, ldap_search_base, manager_id):
     """Lookup a manager's DN in AD by their employeeID."""
     if not manager_id:
         return None
-    conn.search(ldap_search_base,
-                f"(employeeID={manager_id})",
-                SUBTREE,
-                attributes=["distinguishedName"])
+    try:
+        found = conn.search(
+            ldap_search_base,
+            f"(employeeID={manager_id})",
+            SUBTREE,
+            attributes=["distinguishedName"],
+        )
+    except Exception as e:
+        logging.warning(f"Manager lookup failed for {manager_id}: {e}")
+        return None
+    if not found:
+        return None
     if conn.entries:
         return conn.entries[0].distinguishedName.value
     return None
@@ -1233,10 +1421,15 @@ def get_adp_employees(token: str, limit: int = 50, offset: int = 0, paginate_all
 
     while True:
         url = f"{base_url}?$top={limit}&$skip={current_offset}"
-        try:
-            response = requests.get(url, headers=headers, cert=client_cert, verify=verify_arg, timeout=10)
-        except requests.RequestException as e:
-            logging.error(f"Failed to retrieve employees: {e}")
+        response = _request_with_retries(
+            "GET",
+            url,
+            action_label=f"ADP workers fetch (offset={current_offset})",
+            headers=headers,
+            cert=client_cert,
+            verify=verify_arg,
+        )
+        if not response:
             return None
         if not response.ok:
             logging.error(f"Failed to retrieve employees (HTTP {response.status_code}): {response.text}")
@@ -1249,6 +1442,9 @@ def get_adp_employees(token: str, limit: int = 50, offset: int = 0, paginate_all
             return None
 
         page_employees = data.get("workers", [])
+        if not isinstance(page_employees, list):
+            logging.error(f"Unexpected ADP workers payload type: {type(page_employees).__name__}")
+            return None
         employees.extend(page_employees)
         logging.info(f"Records retrieved so far: {len(employees)}")
 
@@ -1353,6 +1549,47 @@ def _format_ldap_error(conn) -> str:
     return "; ".join(parts) if parts else "no ldap error details"
 
 
+def _is_bind_lost_result(result: dict) -> bool:
+    """Detect AD-style bind-lost result payloads."""
+    payload = result or {}
+    msg = str(payload.get("message") or "").lower()
+    return payload.get("result") == 1 and "successful bind must be completed" in msg
+
+
+def _safe_unbind(conn, context: str):
+    """Unbind LDAP connection without raising; include context on failure."""
+    if not conn:
+        return
+    try:
+        conn.unbind()
+    except Exception as e:
+        logging.warning(f"LDAP unbind failed during {context}: {e}")
+
+
+def _is_email_identifier_attribute(attr: str) -> bool:
+    """Return True when an attribute is an email-routing identifier."""
+    return (attr or "").strip().lower() in EMAIL_IDENTIFIER_UPDATE_DENYLIST
+
+
+def _filter_blocked_update_changes(changes: dict, context: str) -> dict:
+    """
+    Remove prohibited update operations (email identifiers) from LDAP changes.
+
+    This guardrail enforces that routing identifiers are set only during
+    account creation and never touched by update/sync flows.
+    """
+    filtered = {}
+    for attr, ops in (changes or {}).items():
+        if _is_email_identifier_attribute(attr):
+            logging.warning(
+                f"Blocked prohibited update attribute '{attr}' for {context}; "
+                "email identifiers are create-time only"
+            )
+            continue
+        filtered[attr] = ops
+    return filtered
+
+
 def _entry_attr_value(entry, attr: str):
     """Safely fetch an LDAP entry attribute value."""
     try:
@@ -1387,6 +1624,10 @@ def _build_update_attributes(
     }
     if get_hire_date(emp):
         desired["userAccountControl"] = get_user_account_control(emp)
+    person = emp.get("person", {}) if isinstance(emp, dict) else {}
+    preferred_first, preferred_last = get_preferred_first_last(person)
+    if preferred_first and preferred_last:
+        desired[ATTR_DISPLAY_NAME] = get_display_name(person)
     manager_dn = get_manager_dn(conn, ldap_search_base, extract_manager_id(emp))
     resolved_manager_department = (manager_department or "").strip()
     if manager_dn:
@@ -1427,10 +1668,15 @@ def _normalize_department_for_compare(value: str) -> str:
     return normalize_department_name(value)
 
 
-def _diff_update_attributes(entry, desired: dict) -> dict:
+def _diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
     """Compute LDAP modify operations for attributes that differ."""
     changes = {}
     for attr, desired_val in desired.items():
+        if _is_email_identifier_attribute(attr):
+            logging.warning(
+                f"Blocked prohibited desired attribute '{attr}' in diff stage for {context or '<unknown>'}"
+            )
+            continue
         if desired_val in (None, ""):
             continue
         current = _entry_attr_value(entry, attr)
@@ -1451,18 +1697,30 @@ def _diff_update_attributes(entry, desired: dict) -> dict:
             if current == desired_val:
                 continue
         changes[attr] = [(MODIFY_REPLACE, [desired_val])]
-    return changes
+    return _filter_blocked_update_changes(changes, context or "<unknown>")
 
 
 def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -> Optional[Connection]:
     """Apply LDAP modifications with basic bind-lost recovery."""
+    changes = _filter_blocked_update_changes(changes, dn)
     if not changes:
         return conn
-    if conn.modify(dn, changes):
+    try:
+        if conn.modify(dn, changes):
+            return conn
+    except Exception as e:
+        logging.error(f"Modify raised exception for {dn}: {e}")
+        if conn_factory:
+            try:
+                _safe_unbind(conn, f"modify exception for {dn}")
+                conn = conn_factory()
+                if conn.modify(dn, changes):
+                    return conn
+            except Exception as reconnect_error:
+                logging.error(f"Reconnect after modify exception failed for {dn}: {reconnect_error}")
         return conn
     result = conn.result or {}
-    msg = str(result.get("message") or "")
-    if result.get("result") == 1 and "successful bind must be completed" in msg:
+    if _is_bind_lost_result(result):
         logging.warning(f"Modify failed for {dn} (bind lost); attempting rebind")
         try:
             if conn.rebind():
@@ -1475,10 +1733,7 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
         if conn_factory:
             logging.warning(f"Reconnecting LDAP after modify bind loss for {dn}")
             try:
-                try:
-                    conn.unbind()
-                except Exception:
-                    pass
+                _safe_unbind(conn, f"modify bind-loss for {dn}")
                 conn = conn_factory()
                 if conn.modify(dn, changes):
                     return conn
@@ -1498,26 +1753,35 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         return conn
 
     person = user_data.get("person", {})
-    first, last = get_first_last(person)
-    if not first or not last:
-        logging.warning(f"Skipping user with incomplete name data: {user_data}")
+    legal_first, legal_last = get_legal_first_last(person)
+    display_name = get_display_name(person)
+    if not legal_first or not legal_last:
+        logging.error("Skipping user with missing required legal name fields for AD givenName/sn")
         return conn
-    full_name = f"{first} {last}".strip()
-    if not full_name:
-        logging.warning(f"Skipping user with incomplete name data: {user_data}")
+    if not display_name:
+        logging.error("Skipping user with missing display name (preferred and legal both unavailable)")
         return conn
+    # CN follows displayName consistently (preferred full name else legal full name).
+    full_name = display_name
 
     emp_id = extract_employee_id(user_data)
+    if not emp_id:
+        logging.warning(f"Skipping user with missing employee ID: {user_data}")
+        return conn
     hire_date = get_hire_date(user_data) or "<no hire date>"
 
     def find_existing_user_dn(connection, employee_id: str) -> Optional[str]:
         """Return DN for an existing employeeID match, if present."""
-        connection.search(
-            ldap_search_base,
-            f"(employeeID={employee_id})",
-            SUBTREE,
-            attributes=["employeeID", "distinguishedName"],
-        )
+        try:
+            connection.search(
+                ldap_search_base,
+                f"(employeeID={employee_id})",
+                SUBTREE,
+                attributes=["employeeID", "distinguishedName"],
+            )
+        except Exception as e:
+            logging.error(f"Existing-user lookup failed for {employee_id}: {e}")
+            return None
         if connection.entries:
             return connection.entries[0].distinguishedName.value
         return None
@@ -1529,15 +1793,20 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         manager_id = extract_manager_id(user_data)
         manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
         if manager_dn:
-            conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
+            conn = _apply_ldap_modifications(
+                conn,
+                existing_dn,
+                {"manager": [(MODIFY_REPLACE, [manager_dn])]},
+                conn_factory,
+            )
         return conn
 
     # Build attributes for new user
-    base_sam_raw = sanitize_string_for_sam(first[0].lower() + last.lower())
+    base_sam_raw = sanitize_string_for_sam(legal_first[0].lower() + legal_last.lower())
     if not base_sam_raw:
         logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
         return conn
-    base_alias = sanitize_string_for_sam(first.lower()) + sanitize_string_for_sam(last.lower())
+    base_alias = sanitize_string_for_sam(legal_first.lower()) + sanitize_string_for_sam(legal_last.lower())
     if not base_alias:
         base_alias = base_sam_raw
     upn_suffix = os.getenv("UPN_SUFFIX", "cfsbrands.com").strip()
@@ -1545,6 +1814,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         upn_suffix = upn_suffix[1:]
 
     def build_sam(suffix: str) -> str:
+        """Build a <=10 char sAMAccountName, preserving collision suffixes."""
         if not suffix:
             return base_sam_raw[:10]
         max_base_len = max(0, 10 - len(suffix))
@@ -1552,9 +1822,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
 
     base_attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
-        "givenName": first,
-        "sn": last,
-        "employeeID": emp_id,
+        ATTR_GIVEN_NAME: legal_first,
+        ATTR_SN: legal_last,
+        ATTR_EMPLOYEE_ID: emp_id,
         "title": extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle"),
         "department": extract_department(user_data),
         "l": extract_work_address_field(user_data, "cityName"),
@@ -1568,8 +1838,16 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     }
 
     mandatory = {
-        "objectClass", "cn", "givenName", "sn", "displayName",
-        "userPrincipalName", "mail", "sAMAccountName", "employeeID", "userAccountControl"
+        "objectClass",
+        ATTR_CN,
+        ATTR_GIVEN_NAME,
+        ATTR_SN,
+        ATTR_DISPLAY_NAME,
+        ATTR_USER_PRINCIPAL_NAME,
+        ATTR_MAIL,
+        ATTR_SAM_ACCOUNT_NAME,
+        ATTR_EMPLOYEE_ID,
+        "userAccountControl",
     }
     dn = None
     attempt = 0
@@ -1590,20 +1868,34 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
             return conn
         alias = base_alias if not suffix else f"{base_alias}{suffix}"
         attrs = dict(base_attrs)
+        # Email-routing identifiers remain create-time only. Update jobs are
+        # blocked from changing these by EMAIL_IDENTIFIER_UPDATE_DENYLIST.
         attrs.update(
             {
-                "cn": cn,
-                "displayName": cn,
-                "userPrincipalName": f"{alias}@{upn_suffix}",
-                "mail": f"{alias}@cfsbrands.com",
-                "sAMAccountName": sam,
+                ATTR_CN: cn,
+                ATTR_DISPLAY_NAME: cn,
+                ATTR_USER_PRINCIPAL_NAME: f"{alias}@{upn_suffix}",
+                ATTR_MAIL: f"{alias}@cfsbrands.com",
+                ATTR_SAM_ACCOUNT_NAME: sam,
             }
         )
         final_attrs = {k: v for k, v in attrs.items() if v or k in mandatory}
         dn_candidate = f"CN={escape_rdn(cn)},{ldap_create_base}"
-        if conn.add(dn_candidate, attributes=final_attrs):
-            dn = dn_candidate
-            break
+        try:
+            if conn.add(dn_candidate, attributes=final_attrs):
+                dn = dn_candidate
+                break
+        except Exception as e:
+            logging.error(f"Add raised exception for {dn_candidate}: {e}")
+            if conn_factory:
+                try:
+                    _safe_unbind(conn, f"add exception for {dn_candidate}")
+                    conn = conn_factory()
+                    attempt += 1
+                    continue
+                except Exception as reconnect_error:
+                    logging.error(f"Reconnect failed after add exception for {dn_candidate}: {reconnect_error}")
+            return conn
         result = conn.result or {}
         msg = str(result.get("message") or "")
         if result.get("result") == 68:
@@ -1616,10 +1908,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                 logging.warning(f"Constraint violation details: {_format_ldap_error(conn)}")
                 if conn_factory:
                     try:
-                        try:
-                            conn.unbind()
-                        except Exception:
-                            pass
+                        _safe_unbind(conn, f"account-id constraint for {dn_candidate}")
                         conn = conn_factory()
                         existing_dn = find_existing_user_dn(conn, emp_id)
                         if existing_dn:
@@ -1637,15 +1926,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                 continue
             logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
             return conn
-        if result.get("result") == 1 and "successful bind must be completed" in msg:
+        if _is_bind_lost_result(result):
             logging.warning(f"Bind lost details: {_format_ldap_error(conn)}")
             if conn_factory:
                 logging.warning(f"Add failed for {dn_candidate} (bind lost); reconnecting and skipping current user")
                 try:
-                    try:
-                        conn.unbind()
-                    except Exception:
-                        pass
+                    _safe_unbind(conn, f"bind-lost add for {dn_candidate}")
                     conn = conn_factory()
                     existing_dn = find_existing_user_dn(conn, emp_id)
                     if existing_dn:
@@ -1686,9 +1972,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
 # ---- Scheduled new-hire provisioning every 15m ----
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
 def scheduled_provision_new_hires(mytimer: func.TimerRequest):
-    """Timer triggered function that provisions recent hires."""
+    """Timer-triggered job that provisions recent ADP hires into AD."""
     logging.info("🔄 scheduled_provision_new_hires triggered")
-    if mytimer.past_due:
+    if mytimer and getattr(mytimer, "past_due", False):
         logging.warning("Timer is past due!")
     token = get_adp_token()
     if not token:
@@ -1763,6 +2049,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
         def conn_factory():
+            """Create a fresh bound LDAP connection for provisioning retries."""
             connection = Connection(
                 server,
                 user=ldap_user,
@@ -1777,28 +2064,31 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
         logging.error(f"❌ Failed to connect to LDAP server: {e}")
         return
     logging.info("🔗 LDAP connection opened")
-    for emp in employees_recent:
-        emp_id = extract_employee_id(emp)
-        person = emp.get("person", {})
-        first, last = get_first_last(person)
-        name = f"{first} {last}".strip() or "<no name>"
-        logging.info(f"➡️  Processing {emp_id} / {name}")
-        try:
-            new_conn = provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base, conn_factory)
-            if not new_conn:
-                logging.error("LDAP connection unavailable; aborting scheduled_provision_new_hires")
-                break
-            conn = new_conn
-        except Exception as e:
-            logging.error(f"❌ Exception provisioning {emp_id}: {e}")
-    conn.unbind()
-    logging.info("🔒 LDAP connection closed — scheduled_provision_new_hires complete")
+    try:
+        for emp in employees_recent:
+            emp_id = extract_employee_id(emp)
+            person = emp.get("person", {})
+            display_name = get_display_name(person) or "<no display name>"
+            legal_first, legal_last = get_legal_first_last(person)
+            legal_name = f"{legal_first} {legal_last}".strip() or "<no legal name>"
+            logging.info(f"➡️  Processing {emp_id} / display='{display_name}' legal='{legal_name}'")
+            try:
+                new_conn = provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base, conn_factory)
+                if not new_conn:
+                    logging.error("LDAP connection unavailable; aborting scheduled_provision_new_hires")
+                    break
+                conn = new_conn
+            except Exception as e:
+                logging.error(f"❌ Exception provisioning {emp_id}: {e}")
+    finally:
+        _safe_unbind(conn, "scheduled_provision_new_hires completion")
+        logging.info("🔒 LDAP connection closed — scheduled_provision_new_hires complete")
 
 
 # ---- Scheduled existing-user update (dry run by default) ----
 @app.schedule(schedule="0 0 * * * *", arg_name="mytimer", run_on_startup=False)
 def scheduled_update_existing_users(mytimer: func.TimerRequest):
-    """Timer triggered function that updates existing AD users from ADP (dry run by default)."""
+    """Timer-triggered job that updates existing AD users from ADP."""
     dry_run = _env_truthy("UPDATE_DRY_RUN", True)
     lookback_days_raw = os.getenv("UPDATE_LOOKBACK_DAYS", "7")
     try:
@@ -1870,6 +2160,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
         def conn_factory():
+            """Create a fresh bound LDAP connection for update retries."""
             connection = Connection(
                 server,
                 user=ldap_user,
@@ -1892,25 +2183,32 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
         emp_id = extract_employee_id(emp)
         if not emp_id:
             continue
-        conn.search(
-            ldap_search_base,
-            f"(employeeID={emp_id})",
-            SUBTREE,
-            attributes=[
-                "distinguishedName",
-                "employeeID",
-                "title",
-                "department",
-                "company",
-                "l",
-                "st",
-                "postalCode",
-                "streetAddress",
-                "co",
-                "manager",
-                "userAccountControl",
-            ],
-        )
+        try:
+            found = conn.search(
+                ldap_search_base,
+                f"(employeeID={emp_id})",
+                SUBTREE,
+                attributes=AD_UPDATE_SEARCH_ATTRIBUTES,
+            )
+        except Exception as e:
+            logging.error(f"LDAP search exception for {emp_id}: {e}")
+            if conn_factory:
+                try:
+                    _safe_unbind(conn, f"update search exception for {emp_id}")
+                    conn = conn_factory()
+                except Exception as reconnect_error:
+                    logging.error(f"Reconnect failed after search exception for {emp_id}: {reconnect_error}")
+            continue
+        if not found and _is_bind_lost_result(getattr(conn, "result", None) or {}):
+            logging.warning(f"Bind lost during update search for {emp_id}; reconnecting")
+            if conn_factory:
+                try:
+                    _safe_unbind(conn, f"update search bind-loss for {emp_id}")
+                    conn = conn_factory()
+                except Exception as reconnect_error:
+                    logging.error(f"Reconnect failed after bind-loss search for {emp_id}: {reconnect_error}")
+                    break
+            continue
         if not conn.entries:
             missing_in_ad += 1
             continue
@@ -1929,7 +2227,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                 current_ad_department=current_department,
                 manager_department=current_manager_department,
             )
-        changes = _diff_update_attributes(entry, desired)
+        changes = _diff_update_attributes(entry, desired, context=f"{emp_id} at {dn}")
         if not changes:
             if log_no_changes:
                 logging.info(f"✅ No updates needed for {emp_id} at {dn}")
@@ -1949,10 +2247,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                 logging.error("LDAP connection unavailable; aborting scheduled_update_existing_users")
                 break
 
-    try:
-        conn.unbind()
-    except Exception:
-        pass
+    _safe_unbind(conn, "scheduled_update_existing_users completion")
     logging.info(
         f"🔒 LDAP connection closed — scheduled_update_existing_users complete "
         f"(users_with_changes={updated_users}, total_changes={total_changes}, missing_in_ad={missing_in_ad})"
@@ -1965,7 +2260,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
 @app.function_name(name="process_request")
 @app.route(route="process", methods=["POST"])
 def process_request(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns all active users with ADP/HR details."""
+    """HTTP endpoint that returns active users with ADP/HR details."""
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Token fail", status_code=500)
@@ -1984,22 +2279,32 @@ def process_request(req: func.HttpRequest) -> func.HttpResponse:
 
     out = []
     for emp in sorted_emps:
-        person = emp.get("person", {})
-        first, last = get_first_last(person)
-        
-        out.append(
-            {
-                "employeeId": extract_employee_id(emp),
-                "givenName": first,
-                "familyName": last,
-                "jobTitle": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
-                "company": extract_company(emp),
-                "department": extract_department(emp),
-                "hireDate": get_hire_date(emp),
-                "terminationDate": get_termination_date(emp),
-                "workAssignments": emp.get("workAssignments", []),
-            }
-        )
+        try:
+            person = emp.get("person", {})
+            legal_first, legal_last = get_legal_first_last(person)
+            preferred_first, preferred_last = get_preferred_first_last(person)
+            display_name = get_display_name(person)
+            out.append(
+                {
+                    "employeeId": extract_employee_id(emp),
+                    "givenName": legal_first,
+                    "familyName": legal_last,
+                    "legalGivenName": legal_first,
+                    "legalFamilyName": legal_last,
+                    "preferredGivenName": preferred_first,
+                    "preferredFamilyName": preferred_last,
+                    "displayName": display_name,
+                    "jobTitle": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
+                    "company": extract_company(emp),
+                    "department": extract_department(emp),
+                    "hireDate": get_hire_date(emp),
+                    "terminationDate": get_termination_date(emp),
+                    "workAssignments": emp.get("workAssignments", []),
+                }
+            )
+        except Exception as e:
+            # Keep endpoint usable even if one ADP record is malformed.
+            logging.warning(f"Skipping malformed process_request worker record: {e}")
     return func.HttpResponse(
         json.dumps(out), mimetype="application/json", status_code=200
     )
@@ -2021,7 +2326,9 @@ def normalize_id(emp_id: str) -> str:
 
 def normalize_dept(dept: str) -> str:
     """Lowercase, strip, and remove non-alphanumeric characters."""
-    return ''.join(c for c in dept.lower().strip() if c.isalnum() or c.isspace())
+    if not dept:
+        return ""
+    return ''.join(c for c in str(dept).lower().strip() if c.isalnum() or c.isspace())
 
 
 def fetch_ad_data_task() -> Optional[dict]:
@@ -2042,6 +2349,9 @@ def fetch_ad_data_task() -> Optional[dict]:
         logging.info(f"🔐 Using CA bundle for export: {ca_bundle}")
     except Exception as e:
         logging.error(f"❌ Unable to determine CA bundle for export: {e}")
+        return None
+    if not os.path.isfile(ca_bundle):
+        logging.error(f"CA bundle not found for export at {ca_bundle}")
         return None
 
     tls = Tls(
@@ -2070,14 +2380,18 @@ def fetch_ad_data_task() -> Optional[dict]:
     cookie = None
     try:
         while True:
-            conn.search(
-                ldap_search_base,
-                "(employeeID=*)",
-                SUBTREE,
-                attributes=["employeeID", "department"],
-                paged_size=page_size,
-                paged_cookie=cookie,
-            )
+            try:
+                conn.search(
+                    ldap_search_base,
+                    "(employeeID=*)",
+                    SUBTREE,
+                    attributes=["employeeID", "department"],
+                    paged_size=page_size,
+                    paged_cookie=cookie,
+                )
+            except Exception as e:
+                logging.error(f"LDAP export search failed: {e}")
+                return None
             for entry in conn.entries:
                 raw_id = entry.employeeID.value
                 raw_dept = entry.department.value if entry.department else None
@@ -2086,7 +2400,7 @@ def fetch_ad_data_task() -> Optional[dict]:
                 if emp_id and dept:
                     ldap_map[emp_id] = dept
 
-            controls = conn.result.get("controls", {})
+            controls = (conn.result or {}).get("controls", {})
             cookie = (
                 controls.get("1.2.840.113556.1.4.319", {})
                 .get("value", {})
@@ -2095,7 +2409,7 @@ def fetch_ad_data_task() -> Optional[dict]:
             if not cookie:
                 break
     finally:
-        conn.unbind()
+        _safe_unbind(conn, "fetch_ad_data_task completion")
         logging.info("🔒 LDAP connection closed for export.")
 
     return ldap_map
@@ -2115,8 +2429,12 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     with ThreadPoolExecutor(max_workers=2) as ex:
         future_adp = ex.submit(get_adp_employees, token)
         future_ldap = ex.submit(fetch_ad_data_task)
-        adp_employees = future_adp.result()
-        ldap_map = future_ldap.result()
+        try:
+            adp_employees = future_adp.result()
+            ldap_map = future_ldap.result()
+        except Exception as e:
+            logging.error(f"Parallel data fetch failed: {e}")
+            return func.HttpResponse("Data fetch execution error.", status_code=500)
 
     if adp_employees is None or ldap_map is None:
         return func.HttpResponse("Data fetch error (ADP or AD).", status_code=500)
@@ -2132,21 +2450,24 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
     # Build dept pairs with detailed logging
     dept_pairs = set()
     for emp in adp_employees:
-        raw_id = extract_employee_id(emp)
-        emp_id = normalize_id(raw_id)
-        if not emp_id:
-            logging.debug(f"Skipping ADP record with no ID: {raw_id}")
-            continue
-        raw_adp_dept = extract_department(emp)
-        adp_dept = normalize_dept(raw_adp_dept)
-        if not adp_dept:
-            logging.debug(f"ADP missing department for ID {emp_id}")
-            continue
-        ad_dept = ldap_map.get(emp_id)
-        if not ad_dept:
-            logging.debug(f"No AD entry for ID {emp_id} (ADP dept '{adp_dept}')")
-            continue
-        dept_pairs.add((adp_dept, ad_dept))
+        try:
+            raw_id = extract_employee_id(emp)
+            emp_id = normalize_id(raw_id)
+            if not emp_id:
+                logging.debug(f"Skipping ADP record with no ID: {raw_id}")
+                continue
+            raw_adp_dept = extract_department(emp)
+            adp_dept = normalize_dept(raw_adp_dept)
+            if not adp_dept:
+                logging.debug(f"ADP missing department for ID {emp_id}")
+                continue
+            ad_dept = ldap_map.get(emp_id)
+            if not ad_dept:
+                logging.debug(f"No AD entry for ID {emp_id} (ADP dept '{adp_dept}')")
+                continue
+            dept_pairs.add((adp_dept, ad_dept))
+        except Exception as e:
+            logging.warning(f"Skipping malformed export worker record: {e}")
 
     # Prepare JSON payload
     result = {
