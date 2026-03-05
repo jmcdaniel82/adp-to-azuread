@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+import socket
 import requests
 import ssl
 import secrets
@@ -94,6 +95,29 @@ def get_adp_ca_bundle() -> str:
     if adp_ca_path and os.path.exists(adp_ca_path):
         return adp_ca_path
     return certifi.where()
+
+
+def _missing_env_vars(names: list[str]) -> list[str]:
+    """Return environment variable names that are unset or empty."""
+    return [name for name in names if not os.getenv(name)]
+
+
+def _log_ldap_target_details(context: str, host: str, ca_bundle: str, port: int = 636):
+    """Log LDAP endpoint and DNS resolution details for troubleshooting."""
+    logging.info(
+        f"{context} LDAP target host='{host}' port={port} use_ssl=True "
+        f"tls_version=TLSv1_2 ca_bundle='{ca_bundle}'"
+    )
+    if not host:
+        return
+    try:
+        resolved = sorted(
+            {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+        )
+        if resolved:
+            logging.info(f"{context} LDAP DNS '{host}' resolved to: {', '.join(resolved)}")
+    except Exception as e:
+        logging.warning(f"{context} LDAP DNS resolution failed for '{host}': {e}")
 
 # ---- Helper functions ----
 
@@ -1289,14 +1313,43 @@ def generate_password(length: int = 24) -> str:
 
 
 def _format_ldap_error(conn) -> str:
-    """Build a concise LDAP error string from connection state."""
+    """Build a concise LDAP diagnostics string from connection state."""
+    if conn is None:
+        return "connection=None"
     parts = []
-    result = getattr(conn, "result", None)
+    result = getattr(conn, "result", None) or {}
     if result:
-        parts.append(f"result={result}")
+        code = result.get("result")
+        desc = result.get("description")
+        msg = result.get("message")
+        rtype = result.get("type")
+        dn = result.get("dn")
+        referrals = result.get("referrals")
+        if code is not None or desc:
+            parts.append(f"result={code} description={desc}")
+        if msg:
+            parts.append(f"message={msg}")
+        if rtype:
+            parts.append(f"type={rtype}")
+        if dn:
+            parts.append(f"dn={dn}")
+        if referrals:
+            parts.append(f"referrals={referrals}")
     last_error = getattr(conn, "last_error", None)
     if last_error:
         parts.append(f"last_error={last_error}")
+    bound = getattr(conn, "bound", None)
+    if bound is not None:
+        parts.append(f"bound={bound}")
+    closed = getattr(conn, "closed", None)
+    if closed is not None:
+        parts.append(f"closed={closed}")
+    server = getattr(conn, "server", None)
+    if server is not None:
+        host = getattr(server, "host", None)
+        port = getattr(server, "port", None)
+        ssl_enabled = getattr(server, "ssl", None)
+        parts.append(f"server={host}:{port} ssl={ssl_enabled}")
     return "; ".join(parts) if parts else "no ldap error details"
 
 
@@ -1523,7 +1576,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     while attempt < 50:
         if hasattr(conn, "bound") and not conn.bound:
             try:
-                conn.bind()
+                if not conn.bind():
+                    logging.error(f"Bind failed before add attempt: {_format_ldap_error(conn)}")
+                    return conn
             except Exception as e:
                 logging.error(f"Rebind failed before add attempt: {e}")
                 return conn
@@ -1558,6 +1613,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         if result.get("result") == 19:
             if "userPrincipalName" in msg or "sAMAccountName" in msg:
                 logging.warning(f"Add failed for {dn_candidate} (constraintViolation on account id); refreshing connection and retrying with suffix")
+                logging.warning(f"Constraint violation details: {_format_ldap_error(conn)}")
                 if conn_factory:
                     try:
                         try:
@@ -1573,6 +1629,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                             if manager_dn:
                                 conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
                             return conn
+                        logging.info(f"Post-reconnect state after account-id constraint: {_format_ldap_error(conn)}")
                     except Exception as e:
                         logging.error(f"Reconnect failed after account-id constraint for {dn_candidate}: {e}")
                         return conn
@@ -1598,7 +1655,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                         if manager_dn:
                             conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
                     else:
-                        logging.error(f"Skipping {emp_id} after bind-lost add; fresh connection ready for next user")
+                        logging.error(
+                            f"Skipping {emp_id} after bind-lost add; fresh connection ready for next user "
+                            f"({_format_ldap_error(conn)})"
+                        )
                     return conn
                 except Exception as e:
                     logging.error(f"Reconnect failed after bind-lost error for {dn_candidate}: {e}")
@@ -1679,6 +1739,12 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
     ldap_create_base = os.getenv("LDAP_CREATE_BASE")
+    missing_ldap = _missing_env_vars(
+        ["LDAP_SERVER", "LDAP_USER", "LDAP_PASSWORD", "LDAP_SEARCH_BASE", "LDAP_CREATE_BASE"]
+    )
+    if missing_ldap:
+        logging.error(f"Missing LDAP configuration for provisioning: {', '.join(missing_ldap)}")
+        return
 
     ca_bundle = get_ca_bundle()
     logging.info(f"Using CA bundle at '{ca_bundle}' for LDAP")
@@ -1686,6 +1752,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     if not os.path.isfile(ca_bundle):
         logging.error(f"CA bundle not found at {ca_bundle}")
         return
+    _log_ldap_target_details("Provisioning", ldap_server, ca_bundle)
 
     tls_config = Tls(
         ca_certs_file=ca_bundle,
@@ -1696,13 +1763,15 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
         def conn_factory():
-            return Connection(
+            connection = Connection(
                 server,
                 user=ldap_user,
                 password=ldap_password,
                 authentication=NTLM,
                 auto_bind=True,
             )
+            logging.info(f"Provisioning LDAP bind established: {_format_ldap_error(connection)}")
+            return connection
         conn = conn_factory()
     except Exception as e:
         logging.error(f"❌ Failed to connect to LDAP server: {e}")
@@ -1778,12 +1847,19 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
     ldap_user = os.getenv("LDAP_USER")
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
+    missing_ldap = _missing_env_vars(
+        ["LDAP_SERVER", "LDAP_USER", "LDAP_PASSWORD", "LDAP_SEARCH_BASE"]
+    )
+    if missing_ldap:
+        logging.error(f"Missing LDAP configuration for update: {', '.join(missing_ldap)}")
+        return
 
     ca_bundle = get_ca_bundle()
     logging.info(f"Using CA bundle at '{ca_bundle}' for LDAP update")
     if not os.path.isfile(ca_bundle):
         logging.error(f"CA bundle not found at {ca_bundle}")
         return
+    _log_ldap_target_details("Update", ldap_server, ca_bundle)
 
     tls_config = Tls(
         ca_certs_file=ca_bundle,
@@ -1794,13 +1870,15 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls_config, get_info=None)
     try:
         def conn_factory():
-            return Connection(
+            connection = Connection(
                 server,
                 user=ldap_user,
                 password=ldap_password,
                 authentication=NTLM,
                 auto_bind=True,
             )
+            logging.info(f"Update LDAP bind established: {_format_ldap_error(connection)}")
+            return connection
         conn = conn_factory()
     except Exception as e:
         logging.error(f"❌ Failed to connect to LDAP server for update: {e}")
@@ -1952,9 +2030,11 @@ def fetch_ad_data_task() -> Optional[dict]:
     ldap_user = os.getenv("LDAP_USER")
     ldap_password = os.getenv("LDAP_PASSWORD")
     ldap_search_base = os.getenv("LDAP_SEARCH_BASE")
-
-    if not all([ldap_server, ldap_user, ldap_password, ldap_search_base]):
-        logging.error("Missing LDAP configuration for export.")
+    missing_ldap = _missing_env_vars(
+        ["LDAP_SERVER", "LDAP_USER", "LDAP_PASSWORD", "LDAP_SEARCH_BASE"]
+    )
+    if missing_ldap:
+        logging.error(f"Missing LDAP configuration for export: {', '.join(missing_ldap)}")
         return None
 
     try:
@@ -1969,6 +2049,7 @@ def fetch_ad_data_task() -> Optional[dict]:
         version=ssl.PROTOCOL_TLS_CLIENT,
         ca_certs_file=ca_bundle,
     )
+    _log_ldap_target_details("Export", ldap_server, ca_bundle)
 
     server = Server(ldap_server, port=636, use_ssl=True, tls=tls, get_info=None)
     try:
@@ -1979,7 +2060,7 @@ def fetch_ad_data_task() -> Optional[dict]:
             authentication=NTLM,
             auto_bind=True,
         )
-        logging.info("🔗 LDAP connection opened for export.")
+        logging.info(f"🔗 LDAP connection opened for export ({_format_ldap_error(conn)})")
     except Exception as e:
         logging.error(f"Failed to connect to LDAP: {e}")
         return None
