@@ -304,7 +304,7 @@ def test_provision_user_cn_collision_adds_suffix():
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
     assert conn.add_calls == 2
     assert conn.add_called == "CN=Bob Smith 2,ou=Users,dc=example,dc=com"
-    assert conn.add_attributes["sAMAccountName"].endswith("2")
+    assert conn.add_attributes["sAMAccountName"] == "bsmith"
 
 
 def test_provision_user_uses_resolved_department_mapping():
@@ -418,8 +418,40 @@ def test_provision_user_upn_constraint_retries_with_suffix():
     emp = _make_emp("Janet", "Jones")
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
     assert conn.add_calls == 2
-    assert conn.add_called == "CN=Janet Jones 2,ou=Users,dc=example,dc=com"
-    assert conn.add_attributes["sAMAccountName"].endswith("2")
+    assert conn.add_called == "CN=Janet Jones,ou=Users,dc=example,dc=com"
+    assert conn.add_attributes["sAMAccountName"] == "jjones"
+    assert conn.add_attributes["userPrincipalName"].startswith("janetjones2@")
+
+
+class DummyConnSAMConstraint(DummyConn):
+    def __init__(self):
+        super().__init__()
+        self.add_calls = 0
+        self.result = {}
+
+    def add(self, dn, attributes=None):
+        self.add_calls += 1
+        self.add_called = dn
+        self.add_attributes = attributes
+        if self.add_calls == 1:
+            self.result = {
+                "result": 19,
+                "description": "constraintViolation",
+                "message": "problem 1005 (CONSTRAINT_ATT_TYPE), Att 90303 (sAMAccountName)",
+            }
+            return False
+        self.result = {"result": 0}
+        return True
+
+
+def test_provision_user_sam_constraint_retries_only_sam_suffix():
+    conn = DummyConnSAMConstraint()
+    emp = _make_emp("Jane", "Doe")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_calls == 2
+    assert conn.add_called == "CN=Jane Doe,ou=Users,dc=example,dc=com"
+    assert conn.add_attributes["sAMAccountName"] == "jdoe2"
+    assert conn.add_attributes["userPrincipalName"].startswith("janedoe@")
 
 
 def test_diff_update_attributes_blocks_email_identifier_updates():

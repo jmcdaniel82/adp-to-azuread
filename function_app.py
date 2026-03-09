@@ -1872,9 +1872,26 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         ATTR_EMPLOYEE_ID,
         "userAccountControl",
     }
+    def _build_numeric_suffix(index: int) -> str:
+        return "" if index == 0 else str(index + 1)
+
+    def _classify_account_id_conflicts(message: str) -> set[str]:
+        """Classify which account identifiers collided from LDAP error text."""
+        msg_lower = (message or "").lower()
+        conflicts = set()
+        if "samaccountname" in msg_lower:
+            conflicts.add("sam")
+        if "userprincipalname" in msg_lower or "mailnickname" in msg_lower or "proxyaddresses" in msg_lower:
+            conflicts.add("alias")
+        return conflicts
+
     dn = None
-    attempt = 0
-    while attempt < 50:
+    max_retry_attempts = 50
+    retry_count = 0
+    cn_index = 0
+    sam_index = 0
+    alias_index = 0
+    while retry_count < max_retry_attempts:
         if hasattr(conn, "bound") and not conn.bound:
             try:
                 if not conn.bind():
@@ -1883,13 +1900,17 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
             except Exception as e:
                 logging.error(f"Rebind failed before add attempt: {e}")
                 return conn
-        suffix = "" if attempt == 0 else str(attempt + 1)
-        cn = full_name if not suffix else f"{full_name} {suffix}"
-        sam = build_sam(suffix)
+
+        cn_suffix = _build_numeric_suffix(cn_index)
+        sam_suffix = _build_numeric_suffix(sam_index)
+        alias_suffix = _build_numeric_suffix(alias_index)
+
+        cn = full_name if not cn_suffix else f"{full_name} {cn_suffix}"
+        sam = build_sam(sam_suffix)
         if not sam:
             logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
             return conn
-        alias = base_alias if not suffix else f"{base_alias}{suffix}"
+        alias = base_alias if not alias_suffix else f"{base_alias}{alias_suffix}"
         attrs = dict(base_attrs)
         # Email-routing identifiers remain create-time only. Update jobs are
         # blocked from changing these by EMAIL_IDENTIFIER_UPDATE_DENYLIST.
@@ -1914,7 +1935,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                 try:
                     _safe_unbind(conn, f"add exception for {dn_candidate}")
                     conn = conn_factory()
-                    attempt += 1
+                    retry_count += 1
                     continue
                 except Exception as reconnect_error:
                     logging.error(f"Reconnect failed after add exception for {dn_candidate}: {reconnect_error}")
@@ -1922,12 +1943,20 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         result = conn.result or {}
         msg = str(result.get("message") or "")
         if result.get("result") == 68:
-            logging.warning(f"Add failed for {dn_candidate} (entryAlreadyExists); retrying with suffix")
-            attempt += 1
+            cn_index += 1
+            retry_count += 1
+            logging.warning(
+                f"Add failed for {dn_candidate} (entryAlreadyExists on DN/CN); "
+                f"retrying with CN suffix {cn_index + 1}"
+            )
             continue
         if result.get("result") == 19:
-            if "userPrincipalName" in msg or "sAMAccountName" in msg:
-                logging.warning(f"Add failed for {dn_candidate} (constraintViolation on account id); refreshing connection and retrying with suffix")
+            conflict_fields = _classify_account_id_conflicts(msg)
+            if conflict_fields:
+                logging.warning(
+                    f"Add failed for {dn_candidate} (constraintViolation on {', '.join(sorted(conflict_fields))}); "
+                    "refreshing connection and retrying only conflicting identifiers"
+                )
                 logging.warning(f"Constraint violation details: {_format_ldap_error(conn)}")
                 if conn_factory:
                     try:
@@ -1945,7 +1974,11 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                     except Exception as e:
                         logging.error(f"Reconnect failed after account-id constraint for {dn_candidate}: {e}")
                         return conn
-                attempt += 1
+                if "sam" in conflict_fields:
+                    sam_index += 1
+                if "alias" in conflict_fields:
+                    alias_index += 1
+                retry_count += 1
                 continue
             logging.error(f"Add failed for {dn_candidate} (constraintViolation): {conn.result}")
             return conn
@@ -1977,7 +2010,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         logging.error(f"Add failed for {dn_candidate}: {conn.result}")
         return conn
     if not dn:
-        logging.error(f"Add failed for base CN '{full_name}': exceeded unique CN attempts")
+        logging.error(
+            f"Add failed for base CN '{full_name}': exceeded unique add retries "
+            f"(cn_index={cn_index}, sam_index={sam_index}, alias_index={alias_index})"
+        )
         return conn
     logging.info(f"User created: {dn} (hireDate={hire_date})")
 
