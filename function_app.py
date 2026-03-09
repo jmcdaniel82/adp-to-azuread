@@ -533,7 +533,14 @@ _AD_COUNTRY_NUMERIC_BY_ALPHA2 = {
 
 
 def build_ad_country_attributes(country_code: str) -> dict:
-    """Map ADP country code to AD country triplet attributes."""
+    """
+    Map ADP country code to AD country triplet attributes.
+
+    AD expects:
+    - co: human-readable country name
+    - c: ISO alpha-2 code
+    - countryCode: numeric ISO value
+    """
     alpha2 = (country_code or "").strip().upper()
     if not alpha2:
         return {"co": None, "c": None, "countryCode": None}
@@ -1361,7 +1368,12 @@ def extract_manager_id(emp):
 
 
 def get_manager_dn(conn, ldap_search_base, manager_id, subject_employee_id: str = ""):
-    """Lookup a manager's DN in AD by their employeeID."""
+    """
+    Lookup a manager DN in AD by manager employeeID.
+
+    Logs an explicit warning when ADP provides a manager employeeID but
+    no matching AD object is found.
+    """
     if not manager_id:
         return None
     try:

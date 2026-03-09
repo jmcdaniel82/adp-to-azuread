@@ -11,6 +11,19 @@ This Azure Functions project syncs worker data from ADP Workforce Now into on-pr
   - `GET /api/export`
 - Generates an offline department-change report with manager context and audit fields.
 
+## Provisioning Behavior
+
+- New-hire provisioning only processes hires in the `SYNC_HIRE_LOOKBACK_DAYS` window.
+- User creation enforces uniqueness by retrying only the conflicting identifier:
+  - CN/DN collisions increment CN/displayName suffix only.
+  - `sAMAccountName` collisions increment sAM suffix only (still max 10 chars).
+  - `userPrincipalName` collisions increment email/UPN alias suffix only.
+- Country fields are written as an AD triplet when country is present:
+  - `co` (display name)
+  - `c` (alpha-2 code)
+  - `countryCode` (numeric ISO code when mapped)
+- Manager assignment is by manager `employeeID`; if ADP provides a manager ID with no AD match, a warning is logged.
+
 ## Synced AD Attributes
 
 - `employeeID`
