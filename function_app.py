@@ -2048,11 +2048,11 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     employees_with_hire_date = [emp for emp in all_employees if get_hire_date(emp)]
     logging.info(f"ℹ️  Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
     
-    hire_lookback_raw = os.getenv("SYNC_HIRE_LOOKBACK_DAYS", "2")
+    hire_lookback_raw = os.getenv("SYNC_HIRE_LOOKBACK_DAYS", "4")
     try:
         hire_lookback_days = max(0, int(hire_lookback_raw))
     except ValueError:
-        hire_lookback_days = 2
+        hire_lookback_days = 4
 
     today = datetime.now(tz=timezone.utc).date()
     cutoff = today - timedelta(days=hire_lookback_days)

@@ -86,7 +86,7 @@ Set these environment variables in Azure App Settings or `local.settings.json` (
 
 ### Hire Provisioning Job
 
-- `SYNC_HIRE_LOOKBACK_DAYS` (default: `2`)
+- `SYNC_HIRE_LOOKBACK_DAYS` (default: `4`)
 
 ## Local Run
 
