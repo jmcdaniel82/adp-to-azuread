@@ -58,6 +58,7 @@ from function_app import (
     get_display_name,
     _diff_update_attributes,
     _build_update_attributes,
+    get_manager_dn,
     ATTR_DISPLAY_NAME,
 )
 
@@ -133,6 +134,27 @@ def test_build_update_attributes_sets_displayname_when_preferred_complete():
     }
     desired = _build_update_attributes(emp, conn=None, ldap_search_base="dc=example,dc=com")
     assert desired[ATTR_DISPLAY_NAME] == get_display_name(person)
+
+
+def test_build_update_attributes_sets_country_triplet():
+    emp = {
+        "person": {
+            "preferredName": {"givenName": "Test", "familyName1": "User"},
+            "legalName": {"givenName": "Test", "familyName1": "User"},
+        },
+        "workAssignments": [
+            {
+                "assignedWorkLocations": [
+                    {"address": {"countryCode": "US"}}
+                ]
+            }
+        ],
+        "workerDates": {"hireDate": "2023-01-01"},
+    }
+    desired = _build_update_attributes(emp, conn=None, ldap_search_base="dc=example,dc=com")
+    assert desired["co"] == "United States"
+    assert desired["c"] == "US"
+    assert desired["countryCode"] == 840
 
 
 class DummyConn:
@@ -264,6 +286,15 @@ def test_provision_user_samaccountname_max_10_chars():
     assert len(conn.add_attributes["sAMAccountName"]) <= 10
 
 
+def test_provision_user_sets_country_triplet():
+    conn = DummyConn()
+    emp = _make_emp("Jane", "Doe")
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_attributes["co"] == "United States"
+    assert conn.add_attributes["c"] == "US"
+    assert conn.add_attributes["countryCode"] == 840
+
+
 def test_provision_user_uses_legal_for_given_and_sn_but_preferred_for_displayname():
     conn = DummyConn()
     emp = _make_emp("Matt", "Norm", legal_first="Mathew", legal_last="Normand")
@@ -390,6 +421,19 @@ def test_provision_user_constraint_violation_no_retry():
     emp = _make_emp("Jane", "Doe")
     provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
     assert conn.add_calls == 1
+
+
+def test_get_manager_dn_warns_when_manager_not_found(caplog):
+    conn = DummyConn()
+    with caplog.at_level("WARNING"):
+        manager_dn = get_manager_dn(
+            conn,
+            "dc=example,dc=com",
+            "MGR123",
+            subject_employee_id="EMP123",
+        )
+    assert manager_dn is None
+    assert "Manager not found in AD for employee EMP123: manager employeeID=MGR123" in caplog.text
 
 
 class DummyConnUPNConstraint(DummyConn):

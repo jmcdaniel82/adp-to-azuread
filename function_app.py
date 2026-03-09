@@ -525,6 +525,26 @@ def extract_company(emp):
     return ""
 
 
+_AD_COUNTRY_NUMERIC_BY_ALPHA2 = {
+    "US": 840,
+    "MX": 484,
+    "CA": 124,
+}
+
+
+def build_ad_country_attributes(country_code: str) -> dict:
+    """Map ADP country code to AD country triplet attributes."""
+    alpha2 = (country_code or "").strip().upper()
+    if not alpha2:
+        return {"co": None, "c": None, "countryCode": None}
+    co_value = "United States" if alpha2 == "US" else alpha2
+    return {
+        "co": co_value,
+        "c": alpha2,
+        "countryCode": _AD_COUNTRY_NUMERIC_BY_ALPHA2.get(alpha2),
+    }
+
+
 def _normalize_dept_signal(value: str) -> str:
     """Normalize free-form labels for deterministic department matching."""
     normalized = (value or "").strip().lower().replace("&", " and ")
@@ -1340,7 +1360,7 @@ def extract_manager_id(emp):
     return None
 
 
-def get_manager_dn(conn, ldap_search_base, manager_id):
+def get_manager_dn(conn, ldap_search_base, manager_id, subject_employee_id: str = ""):
     """Lookup a manager's DN in AD by their employeeID."""
     if not manager_id:
         return None
@@ -1355,9 +1375,25 @@ def get_manager_dn(conn, ldap_search_base, manager_id):
         logging.warning(f"Manager lookup failed for {manager_id}: {e}")
         return None
     if not found:
+        if subject_employee_id:
+            logging.warning(
+                "Manager not found in AD for employee %s: manager employeeID=%s",
+                subject_employee_id,
+                manager_id,
+            )
+        else:
+            logging.warning(f"Manager not found in AD: manager employeeID={manager_id}")
         return None
     if conn.entries:
         return conn.entries[0].distinguishedName.value
+    if subject_employee_id:
+        logging.warning(
+            "Manager not found in AD for employee %s: manager employeeID=%s",
+            subject_employee_id,
+            manager_id,
+        )
+    else:
+        logging.warning(f"Manager not found in AD: manager employeeID={manager_id}")
     return None
 
 
@@ -1608,10 +1644,8 @@ def _build_update_attributes(
     manager_department: str = "",
 ) -> dict:
     """Map ADP worker data to AD attributes used for updates."""
-    country_code = extract_work_address_field(emp, "countryCode")
-    co_value = None
-    if country_code:
-        co_value = "United States" if country_code.upper() == "US" else country_code
+    emp_id = extract_employee_id(emp)
+    country_attrs = build_ad_country_attributes(extract_work_address_field(emp, "countryCode"))
 
     desired = {
         "title": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
@@ -1620,7 +1654,9 @@ def _build_update_attributes(
         "postalCode": extract_work_address_field(emp, "postalCode"),
         "st": extract_state_from_work(emp),
         "streetAddress": extract_work_address_field(emp, "lineOne"),
-        "co": co_value,
+        "co": country_attrs["co"],
+        "c": country_attrs["c"],
+        "countryCode": country_attrs["countryCode"],
     }
     if get_hire_date(emp):
         desired["userAccountControl"] = get_user_account_control(emp)
@@ -1628,7 +1664,12 @@ def _build_update_attributes(
     preferred_first, preferred_last = get_preferred_first_last(person)
     if preferred_first and preferred_last:
         desired[ATTR_DISPLAY_NAME] = get_display_name(person)
-    manager_dn = get_manager_dn(conn, ldap_search_base, extract_manager_id(emp))
+    manager_dn = get_manager_dn(
+        conn,
+        ldap_search_base,
+        extract_manager_id(emp),
+        subject_employee_id=emp_id,
+    )
     resolved_manager_department = (manager_department or "").strip()
     if manager_dn:
         desired["manager"] = manager_dn
@@ -1646,7 +1687,6 @@ def _build_update_attributes(
         desired["department"] = resolved_department
 
     if _env_truthy("LOG_DEPARTMENT_MAPPING", False):
-        emp_id = extract_employee_id(emp)
         logging.info(
             "Department resolution for %s: proposed=%s, evidence=%s, confidence=%s, block=%s",
             emp_id,
@@ -1747,9 +1787,10 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
 
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, conn_factory=None):
     """Create and enable an AD user using data from ADP."""
-    country_code = extract_work_address_field(user_data, "countryCode") or ""
-    if not country_code.upper() or country_code.upper() == "MX":
-        logging.info(f"Skipping provisioning for country code '{country_code}'")
+    country_attrs = build_ad_country_attributes(extract_work_address_field(user_data, "countryCode"))
+    country_alpha2 = country_attrs.get("c") or ""
+    if not country_alpha2 or country_alpha2 == "MX":
+        logging.info(f"Skipping provisioning for country code '{country_alpha2}'")
         return conn
 
     person = user_data.get("person", {})
@@ -1791,7 +1832,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         logging.info(f"User already exists: {emp_id} at {existing_dn}")
         # If user exists, update manager if needed
         manager_id = extract_manager_id(user_data)
-        manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+        manager_dn = get_manager_dn(
+            conn,
+            ldap_search_base,
+            manager_id,
+            subject_employee_id=emp_id,
+        )
         if manager_dn:
             conn = _apply_ldap_modifications(
                 conn,
@@ -1820,7 +1866,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         max_base_len = max(0, 10 - len(suffix))
         return f"{base_sam_raw[:max_base_len]}{suffix}"
 
-    manager_dn = get_manager_dn(conn, ldap_search_base, extract_manager_id(user_data))
+    manager_dn = get_manager_dn(
+        conn,
+        ldap_search_base,
+        extract_manager_id(user_data),
+        subject_employee_id=emp_id,
+    )
     resolved_manager_department = ""
     if manager_dn:
         manager_dept_from_dn = get_department_by_dn(conn, manager_dn)
@@ -1854,7 +1905,9 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         "postalCode": extract_work_address_field(user_data, "postalCode"),
         "st": extract_state_from_work(user_data),
         "streetAddress": extract_work_address_field(user_data, "lineOne"),
-        "co": "United States" if country_code.upper() == "US" else country_code,
+        "co": country_attrs["co"],
+        "c": country_attrs["c"],
+        "countryCode": country_attrs["countryCode"],
         "company": extract_company(user_data),
         "manager": manager_dn,
         "userAccountControl": get_user_account_control(user_data),
@@ -1966,7 +2019,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                         if existing_dn:
                             logging.info(f"User found after reconnect: {emp_id} at {existing_dn}; skipping add")
                             manager_id = extract_manager_id(user_data)
-                            manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+                            manager_dn = get_manager_dn(
+                                conn,
+                                ldap_search_base,
+                                manager_id,
+                                subject_employee_id=emp_id,
+                            )
                             if manager_dn:
                                 conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
                             return conn
@@ -1993,7 +2051,12 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                     if existing_dn:
                         logging.info(f"User found after bind-loss reconnect: {emp_id} at {existing_dn}")
                         manager_id = extract_manager_id(user_data)
-                        manager_dn = get_manager_dn(conn, ldap_search_base, manager_id)
+                        manager_dn = get_manager_dn(
+                            conn,
+                            ldap_search_base,
+                            manager_id,
+                            subject_employee_id=emp_id,
+                        )
                         if manager_dn:
                             conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
                     else:

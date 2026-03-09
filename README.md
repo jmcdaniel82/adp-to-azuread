@@ -30,6 +30,8 @@ This Azure Functions project syncs worker data from ADP Workforce Now into on-pr
 - `postalCode`
 - `streetAddress`
 - `co`
+- `c`
+- `countryCode`
 - `userAccountControl`
 
 ## Department Resolution (V2)
