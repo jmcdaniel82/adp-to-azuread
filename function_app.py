@@ -1820,20 +1820,43 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         max_base_len = max(0, 10 - len(suffix))
         return f"{base_sam_raw[:max_base_len]}{suffix}"
 
+    manager_dn = get_manager_dn(conn, ldap_search_base, extract_manager_id(user_data))
+    resolved_manager_department = ""
+    if manager_dn:
+        manager_dept_from_dn = get_department_by_dn(conn, manager_dn)
+        if manager_dept_from_dn:
+            resolved_manager_department = manager_dept_from_dn
+
+    resolution = resolve_local_ac_department(
+        user_data,
+        manager_department=resolved_manager_department,
+    )
+    resolved_department = resolution.get("proposedDepartmentV2")
+
+    if _env_truthy("LOG_DEPARTMENT_MAPPING", False):
+        logging.info(
+            "Department resolution for %s (create): proposed=%s, evidence=%s, confidence=%s, block=%s",
+            emp_id,
+            resolved_department or "<none>",
+            resolution.get("evidenceUsed") or "<none>",
+            resolution.get("confidence") or "<none>",
+            resolution.get("blockReason") or "<none>",
+        )
+
     base_attrs = {
         "objectClass": ["top", "person", "organizationalPerson", "user"],
         ATTR_GIVEN_NAME: legal_first,
         ATTR_SN: legal_last,
         ATTR_EMPLOYEE_ID: emp_id,
         "title": extract_business_title(user_data) or extract_assignment_field(user_data, "jobTitle"),
-        "department": extract_department(user_data),
+        "department": resolved_department,
         "l": extract_work_address_field(user_data, "cityName"),
         "postalCode": extract_work_address_field(user_data, "postalCode"),
         "st": extract_state_from_work(user_data),
         "streetAddress": extract_work_address_field(user_data, "lineOne"),
         "co": "United States" if country_code.upper() == "US" else country_code,
         "company": extract_company(user_data),
-        "manager": get_manager_dn(conn, ldap_search_base, extract_manager_id(user_data)),
+        "manager": manager_dn,
         "userAccountControl": get_user_account_control(user_data),
     }
 

@@ -307,6 +307,18 @@ def test_provision_user_cn_collision_adds_suffix():
     assert conn.add_attributes["sAMAccountName"].endswith("2")
 
 
+def test_provision_user_uses_resolved_department_mapping():
+    conn = DummyConn()
+    emp = _make_department_emp(
+        assigned_dept="491650",
+        assigned_dept_code="491650",
+        assigned_dept_long_name="Distribution - Charlotte DL",
+    )
+    emp["workAssignments"][0]["assignedWorkLocations"] = [{"address": {"countryCode": "US"}}]
+    provision_user_in_ad(emp, conn, "dc=example,dc=com", "ou=Users,dc=example,dc=com")
+    assert conn.add_attributes["department"] == "Supply Chain"
+
+
 def test_extract_work_address_field_falls_back_to_home():
     emp = {
         "workAssignments": [
