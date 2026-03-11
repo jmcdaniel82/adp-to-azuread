@@ -14,6 +14,7 @@ import certifi   # fallback CA bundle provider
 import azure.functions as func
 from ldap3 import BASE, Server, Connection, SUBTREE, Tls, NTLM, MODIFY_REPLACE
 from ldap3.utils.dn import escape_rdn
+from ldap3.utils.conv import escape_filter_chars
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any
@@ -33,7 +34,9 @@ app = func.FunctionApp()
 # - Scheduler defaults if unset/invalid:
 #   SYNC_HIRE_LOOKBACK_DAYS=4, UPDATE_LOOKBACK_DAYS=7, UPDATE_DRY_RUN=true.
 # - Provisioning collision tuning:
-#   CN_COLLISION_THRESHOLD=10 triggers employee-ID-based CN fallback naming.
+#   CN_COLLISION_THRESHOLD=5 controls how often collision diagnostics are emitted.
+# - Duplicate profile diagnostics:
+#   ADP_PROFILE_DUP_WARN_LIMIT=25 limits non-blocking duplicate-profile warnings.
 
 # HTTP/LDAP retry and timeout defaults for outbound network calls.
 ADP_HTTP_TIMEOUT_SECONDS = 10
@@ -282,6 +285,150 @@ def extract_last_updated(emp) -> Optional[datetime]:
             if dt:
                 return dt
     return None
+
+
+def _parse_datetime_silent(value: str) -> Optional[datetime]:
+    """Parse datetime without emitting parse-error logs for dedupe heuristics."""
+    if not value:
+        return None
+    try:
+        val = value.strip()
+        if val.endswith("Z"):
+            val = val[:-1] + "+00:00"
+        dt = datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _dedupe_recency_key(emp, index: int) -> tuple[int, float, int]:
+    """Return a sort key preferring latest lastUpdated, then latest hire date."""
+    updated_at = extract_last_updated(emp)
+    if updated_at:
+        return (2, updated_at.timestamp(), index)
+    hire_date = _parse_datetime_silent(get_hire_date(emp) or "")
+    if hire_date:
+        return (1, hire_date.timestamp(), index)
+    return (0, float(index), index)
+
+
+def dedupe_workers_by_employee_id(workers: list, context: str) -> list:
+    """
+    Keep exactly one worker record per employeeID, preferring the newest record.
+
+    This prevents duplicate ADP rows from generating duplicate create/update attempts.
+    """
+    if not isinstance(workers, list) or not workers:
+        return workers
+
+    selected: dict[str, tuple[int, tuple[int, float, int], dict]] = {}
+    duplicates_seen = 0
+
+    for index, worker in enumerate(workers):
+        employee_id = normalize_id(extract_employee_id(worker))
+        if not employee_id:
+            continue
+        key = _dedupe_recency_key(worker, index)
+        current = selected.get(employee_id)
+        if not current:
+            selected[employee_id] = (index, key, worker)
+            continue
+        duplicates_seen += 1
+        _, current_key, _ = current
+        if key >= current_key:
+            selected[employee_id] = (index, key, worker)
+
+    if duplicates_seen == 0:
+        return workers
+
+    kept_indexes = {idx for idx, _, _ in selected.values()}
+    deduped = []
+    dropped = 0
+    for index, worker in enumerate(workers):
+        employee_id = normalize_id(extract_employee_id(worker))
+        if not employee_id:
+            deduped.append(worker)
+            continue
+        if index in kept_indexes:
+            deduped.append(worker)
+        else:
+            dropped += 1
+
+    logging.warning(
+        f"[WARN] {context} deduped ADP records by employeeID: "
+        f"input={len(workers)} output={len(deduped)} dropped={dropped}"
+    )
+    return deduped
+
+
+def _normalize_profile_signal(value: str) -> str:
+    """Normalize profile text fields for duplicate-profile warning signals."""
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _profile_signature(worker: dict) -> tuple[str, str, str, str]:
+    """Build a soft duplicate signature (non-blocking warning only)."""
+    person = worker.get("person", {})
+    display = get_display_name(person)
+    title = extract_business_title(worker) or extract_assignment_field(worker, "jobTitle")
+    department = extract_department(worker)
+    manager_id = extract_manager_id(worker) or ""
+    return (
+        _normalize_profile_signal(display),
+        _normalize_profile_signal(title),
+        _normalize_profile_signal(department),
+        _normalize_profile_signal(manager_id),
+    )
+
+
+def log_potential_duplicate_profiles(workers: list, context: str):
+    """
+    Warn when multiple employeeIDs share the same profile signature.
+
+    This is diagnostic only and never blocks provisioning/update decisions.
+    """
+    if not isinstance(workers, list) or not workers:
+        return
+
+    grouped: dict[tuple[str, str, str, str], set[str]] = {}
+    for worker in workers:
+        employee_id = normalize_id(extract_employee_id(worker))
+        if not employee_id:
+            continue
+        signature = _profile_signature(worker)
+        if not all(signature):
+            continue
+        grouped.setdefault(signature, set()).add(employee_id)
+
+    max_warnings_raw = os.getenv("ADP_PROFILE_DUP_WARN_LIMIT", "25")
+    try:
+        max_warnings = max(1, int(max_warnings_raw))
+    except ValueError:
+        max_warnings = 25
+
+    warning_count = 0
+    for signature, employee_ids in grouped.items():
+        if len(employee_ids) < 2:
+            continue
+        warning_count += 1
+        display, title, department, manager_id = signature
+        ids = sorted(employee_ids)
+        preview = ",".join(ids[:10]) + ("..." if len(ids) > 10 else "")
+        logging.warning(
+            f"[WARN] {context} possible duplicate ADP profile (non-blocking): "
+            f"employeeIDs={preview} display='{display}' title='{title}' "
+            f"department='{department}' managerID='{manager_id}'"
+        )
+        if warning_count >= max_warnings:
+            logging.warning(
+                f"[WARN] {context} duplicate profile warning limit reached "
+                f"(ADP_PROFILE_DUP_WARN_LIMIT={max_warnings})"
+            )
+            break
 
 def get_adp_token() -> Optional[str]:
     """
@@ -1834,6 +1981,59 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
     return conn
 
 
+def _log_cn_conflict_inventory(conn, ldap_create_base: str, full_name: str, employee_id: str, max_entries: int = 12):
+    """
+    Log conflicting AD objects for one-time cleanup when CN collisions persist.
+
+    This diagnostics path is read-only and intended to provide operations with a
+    concrete inventory of matching objects in the create OU.
+    """
+    if not conn or not ldap_create_base or not full_name:
+        return
+    try:
+        escaped_name = escape_filter_chars(full_name)
+        search_filter = f"(|(cn={escaped_name}*)(displayName={escaped_name}*))"
+        found = conn.search(
+            ldap_create_base,
+            search_filter,
+            SUBTREE,
+            attributes=[
+                "distinguishedName",
+                ATTR_CN,
+                ATTR_DISPLAY_NAME,
+                ATTR_EMPLOYEE_ID,
+                ATTR_USER_PRINCIPAL_NAME,
+                ATTR_MAIL,
+            ],
+            size_limit=max_entries,
+        )
+        if not found or not conn.entries:
+            logging.warning(
+                f"[WARN] CN collision diagnostics found no '{full_name}*' entries under '{ldap_create_base}' "
+                f"for employeeID={employee_id}"
+            )
+            return
+
+        entries_preview = []
+        for entry in conn.entries[:max_entries]:
+            dn = _entry_attr_value(entry, "distinguishedName") or str(getattr(entry, "entry_dn", ""))
+            cn = _entry_attr_value(entry, ATTR_CN) or ""
+            display = _entry_attr_value(entry, ATTR_DISPLAY_NAME) or ""
+            existing_emp_id = _entry_attr_value(entry, ATTR_EMPLOYEE_ID) or ""
+            upn = _entry_attr_value(entry, ATTR_USER_PRINCIPAL_NAME) or ""
+            mail = _entry_attr_value(entry, ATTR_MAIL) or ""
+            entries_preview.append(
+                f"dn='{dn}' cn='{cn}' display='{display}' employeeID='{existing_emp_id}' "
+                f"upn='{upn}' mail='{mail}'"
+            )
+        logging.warning(
+            f"[WARN] CN collision diagnostics for employeeID {employee_id}: "
+            + " | ".join(entries_preview)
+        )
+    except Exception as e:
+        logging.warning(f"[WARN] CN collision diagnostics failed for employeeID {employee_id}: {e}")
+
+
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, conn_factory=None):
     """Create and enable an AD user using data from ADP."""
     country_attrs = build_ad_country_attributes(extract_work_address_field(user_data, "countryCode"))
@@ -1851,7 +2051,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     if not display_name:
         logging.error("Skipping user with missing display name (preferred and legal both unavailable)")
         return conn
-    # CN follows displayName consistently (preferred full name else legal full name).
+    # Keep displayName human-friendly while CN carries deterministic uniqueness.
     full_name = display_name
 
     emp_id = extract_employee_id(user_data)
@@ -1994,20 +2194,19 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     dn = None
     # Safety cap prevents infinite collision loops on duplicate names/identifiers.
     max_retry_attempts = 50
-    cn_collision_threshold_raw = os.getenv("CN_COLLISION_THRESHOLD", "10")
+    cn_collision_threshold_raw = os.getenv("CN_COLLISION_THRESHOLD", "5")
     try:
         cn_collision_threshold = max(1, int(cn_collision_threshold_raw))
     except ValueError:
-        cn_collision_threshold = 10
+        cn_collision_threshold = 5
 
     retry_count = 0
     cn_index = 0
     sam_index = 0
     alias_index = 0
     cn_collision_count = 0
-    cn_strategy_switched = False
-    cn_root = full_name
-    emp_token = sanitize_string_for_sam(emp_id)[-4:] or emp_id[-4:]
+    employee_cn_token = sanitize_string_for_sam(emp_id) or emp_id.strip()
+    cn_root = f"{full_name} {employee_cn_token}".strip()
 
     while retry_count < max_retry_attempts:
         if hasattr(conn, "bound") and not conn.bound:
@@ -2036,7 +2235,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         attrs.update(
             {
                 ATTR_CN: cn,
-                ATTR_DISPLAY_NAME: cn,
+                ATTR_DISPLAY_NAME: full_name,
                 ATTR_USER_PRINCIPAL_NAME: f"{alias}@{upn_suffix}",
                 ATTR_MAIL: f"{alias}@cfsbrands.com",
                 ATTR_SAM_ACCOUNT_NAME: sam,
@@ -2069,23 +2268,24 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
             cn_collision_count += 1
             cn_index += 1
             retry_count += 1
-            if (
-                not cn_strategy_switched
-                and cn_collision_count >= cn_collision_threshold
-                and emp_token
-            ):
-                # Alternate ID strategy: after repeated name collisions, include a
-                # stable employee-derived token in CN to reduce further conflicts.
-                cn_strategy_switched = True
-                cn_root = f"{full_name} {emp_token}"
-                cn_index = 0
-                cn_collision_count = 0
-                logging.warning(
-                    f"Repeated CN collisions for employeeID {emp_id} under '{ldap_create_base}' "
-                    f"(threshold={cn_collision_threshold}). Switching CN base from '{full_name}' "
-                    f"to '{cn_root}'. Action: review existing duplicate-name objects if collisions persist."
-                )
-                continue
+            if cn_collision_count % cn_collision_threshold == 0:
+                existing_dn = find_existing_user_dn(conn, emp_id)
+                if existing_dn:
+                    logging.info(
+                        f"[INFO] Existing user discovered during CN collision retries; "
+                        f"employeeID={emp_id} dn={existing_dn}"
+                    )
+                    manager_id = extract_manager_id(user_data)
+                    manager_dn = get_manager_dn(
+                        conn,
+                        ldap_search_base,
+                        manager_id,
+                        subject_employee_id=emp_id,
+                    )
+                    if manager_dn:
+                        conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
+                    return conn
+                _log_cn_conflict_inventory(conn, ldap_create_base, full_name, emp_id)
             logging.warning(
                 f"Add failed for {dn_candidate} (entryAlreadyExists on DN/CN); "
                 f"retrying with CN suffix {cn_index + 1} (employeeID={emp_id})"
@@ -2165,8 +2365,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     if not dn:
         logging.error(
             f"Add failed for employeeID {emp_id}: exceeded unique add retries "
-            f"(cn_root='{cn_root}', cn_index={cn_index}, sam_index={sam_index}, alias_index={alias_index}, "
-            f"strategy_switched={cn_strategy_switched}). "
+            f"(cn_root='{cn_root}', cn_index={cn_index}, sam_index={sam_index}, "
+            f"alias_index={alias_index}, cn_collision_count={cn_collision_count}). "
             f"Action: inspect existing AD objects under '{ldap_create_base}' for conflicting CN/UPN/mail values."
         )
         return conn
@@ -2188,21 +2388,23 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
 @app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
 def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     """Timer-triggered job that provisions recent ADP hires into AD."""
-    logging.info("🔄 scheduled_provision_new_hires triggered")
+    logging.info("[INFO] scheduled_provision_new_hires triggered")
     if mytimer and getattr(mytimer, "past_due", False):
-        logging.warning("Timer is past due!")
+        logging.warning("[WARN] Timer is past due")
     token = get_adp_token()
     if not token:
-        logging.error("❌ Failed to retrieve ADP token.")
+        logging.error("[ERROR] Failed to retrieve ADP token")
         return
-    logging.info("✅ ADP token acquired")
+    logging.info("[INFO] ADP token acquired")
     all_employees = get_adp_employees(token)
     if all_employees is None:
-        logging.error("❌ get_adp_employees returned None")
+        logging.error("[ERROR] get_adp_employees returned None")
         return
-    
+    all_employees = dedupe_workers_by_employee_id(all_employees, "scheduled_provision_new_hires")
+    log_potential_duplicate_profiles(all_employees, "scheduled_provision_new_hires")
+
     employees_with_hire_date = [emp for emp in all_employees if get_hire_date(emp)]
-    logging.info(f"ℹ️  Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
+    logging.info(f"[INFO] Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
     
     hire_lookback_raw = os.getenv("SYNC_HIRE_LOOKBACK_DAYS", "4")
     # Assumption: lookback filter is date-based in UTC (not hour/minute precise).
@@ -2232,11 +2434,11 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
         else:
             logging.debug(f"Skipping (too old) {extract_employee_id(emp)} hired on {hire_date}")
     logging.info(
-        f"ℹ️  {len(employees_recent)} employees hired since {cutoff.isoformat()} "
+        f"[INFO] {len(employees_recent)} employees hired since {cutoff.isoformat()} "
         f"(lookback_days={hire_lookback_days})"
     )
     if not employees_recent:
-        logging.info("🚫 Nothing to sync; exiting scheduled_provision_new_hires")
+        logging.info("[INFO] Nothing to sync; exiting scheduled_provision_new_hires")
         return
     ldap_server = os.getenv("LDAP_SERVER")
     ldap_user = os.getenv("LDAP_USER")
@@ -2280,9 +2482,9 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
         conn = conn_factory()
     except Exception as e:
         # Provisioning cannot continue without a bound LDAP connection.
-        logging.error(f"❌ Failed to connect to LDAP server: {e}")
+        logging.error(f"[ERROR] Failed to connect to LDAP server: {e}")
         return
-    logging.info("🔗 LDAP connection opened")
+    logging.info("[INFO] LDAP connection opened")
     try:
         for emp in employees_recent:
             emp_id = extract_employee_id(emp)
@@ -2290,7 +2492,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
             display_name = get_display_name(person) or "<no display name>"
             legal_first, legal_last = get_legal_first_last(person)
             legal_name = f"{legal_first} {legal_last}".strip() or "<no legal name>"
-            logging.info(f"➡️  Processing {emp_id} / display='{display_name}' legal='{legal_name}'")
+            logging.info(f"[INFO] Processing {emp_id} / display='{display_name}' legal='{legal_name}'")
             try:
                 new_conn = provision_user_in_ad(emp, conn, ldap_search_base, ldap_create_base, conn_factory)
                 if not new_conn:
@@ -2299,10 +2501,10 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
                 conn = new_conn
             except Exception as e:
                 # Continue batch processing when one worker record triggers an unexpected exception.
-                logging.error(f"❌ Exception provisioning {emp_id}: {e}")
+                logging.error(f"[ERROR] Exception provisioning {emp_id}: {e}")
     finally:
         _safe_unbind(conn, "scheduled_provision_new_hires completion")
-        logging.info("🔒 LDAP connection closed — scheduled_provision_new_hires complete")
+        logging.info("[INFO] LDAP connection closed - scheduled_provision_new_hires complete")
 
 
 # ---- Scheduled existing-user update (dry run by default) ----
@@ -2320,16 +2522,18 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
     include_missing_updates = _env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True)
     log_no_changes = _env_truthy("UPDATE_LOG_NO_CHANGES", False)
 
-    logging.info(f"🔁 scheduled_update_existing_users triggered (dry_run={dry_run}, lookback_days={lookback_days})")
+    logging.info(f"[INFO] scheduled_update_existing_users triggered (dry_run={dry_run}, lookback_days={lookback_days})")
     token = get_adp_token()
     if not token:
-        logging.error("❌ Failed to retrieve ADP token for update.")
+        logging.error("[ERROR] Failed to retrieve ADP token for update")
         return
-    logging.info("✅ ADP token acquired for update")
+    logging.info("[INFO] ADP token acquired for update")
     all_employees = get_adp_employees(token)
     if all_employees is None:
-        logging.error("❌ get_adp_employees returned None for update")
+        logging.error("[ERROR] get_adp_employees returned None for update")
         return
+    all_employees = dedupe_workers_by_employee_id(all_employees, "scheduled_update_existing_users")
+    log_potential_duplicate_profiles(all_employees, "scheduled_update_existing_users")
 
     candidates = []
     missing_last_updated = 0
@@ -2346,15 +2550,15 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                 if include_missing_updates:
                     candidates.append(emp)
         logging.info(
-            f"ℹ️  {len(candidates)} ADP employees considered for update since {cutoff.date().isoformat()} "
+            f"[INFO] {len(candidates)} ADP employees considered for update since {cutoff.date().isoformat()} "
             f"(missing lastUpdated={missing_last_updated})"
         )
     else:
         candidates = all_employees
-        logging.info(f"ℹ️  {len(candidates)} ADP employees considered for update (no lookback filter)")
+        logging.info(f"[INFO] {len(candidates)} ADP employees considered for update (no lookback filter)")
 
     if not candidates:
-        logging.info("🚫 Nothing to update; exiting scheduled_update_existing_users")
+        logging.info("[INFO] Nothing to update; exiting scheduled_update_existing_users")
         return
 
     ldap_server = os.getenv("LDAP_SERVER")
@@ -2397,10 +2601,10 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
         conn = conn_factory()
     except Exception as e:
         # Update job cannot proceed without LDAP connectivity.
-        logging.error(f"❌ Failed to connect to LDAP server for update: {e}")
+        logging.error(f"[ERROR] Failed to connect to LDAP server for update: {e}")
         return
 
-    logging.info("🔗 LDAP connection opened for update")
+    logging.info("[INFO] LDAP connection opened for update")
     updated_users = 0
     total_changes = 0
     missing_in_ad = 0
@@ -2458,14 +2662,14 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
         changes = _diff_update_attributes(entry, desired, context=f"{emp_id} at {dn}")
         if not changes:
             if log_no_changes:
-                logging.info(f"✅ No updates needed for {emp_id} at {dn}")
+                logging.info(f"[INFO] No updates needed for {emp_id} at {dn}")
             continue
         updated_users += 1
         for attr, ops in changes.items():
             desired_val = ops[0][1][0] if ops and ops[0][1] else None
             current_val = _entry_attr_value(entry, attr)
             if dry_run:
-                logging.info(f"🧪 DRY RUN update {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
+                logging.info(f"[INFO] DRY RUN update {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
             else:
                 logging.info(f"Updating {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
         total_changes += len(changes)
@@ -2477,7 +2681,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
 
     _safe_unbind(conn, "scheduled_update_existing_users completion")
     logging.info(
-        f"🔒 LDAP connection closed — scheduled_update_existing_users complete "
+        f"[INFO] LDAP connection closed - scheduled_update_existing_users complete "
         f"(users_with_changes={updated_users}, total_changes={total_changes}, missing_in_ad={missing_in_ad})"
     )
 
@@ -2581,10 +2785,10 @@ def fetch_ad_data_task() -> Optional[dict]:
 
     try:
         ca_bundle = get_ca_bundle()
-        logging.info(f"🔐 Using CA bundle for export: {ca_bundle}")
+        logging.info(f"[INFO] Using CA bundle for export: {ca_bundle}")
     except Exception as e:
         # Export endpoint cannot validate TLS without a resolved CA bundle.
-        logging.error(f"❌ Unable to determine CA bundle for export: {e}")
+        logging.error(f"[ERROR] Unable to determine CA bundle for export: {e}")
         return None
     if not os.path.isfile(ca_bundle):
         logging.error(f"CA bundle not found for export at {ca_bundle}")
@@ -2606,7 +2810,7 @@ def fetch_ad_data_task() -> Optional[dict]:
             authentication=NTLM,
             auto_bind=True,
         )
-        logging.info(f"🔗 LDAP connection opened for export ({_format_ldap_error(conn)})")
+        logging.info(f"[INFO] LDAP connection opened for export ({_format_ldap_error(conn)})")
     except Exception as e:
         # Return a controlled failure when LDAP bind cannot be established.
         logging.error(f"Failed to connect to LDAP: {e}")
@@ -2648,7 +2852,7 @@ def fetch_ad_data_task() -> Optional[dict]:
                 break
     finally:
         _safe_unbind(conn, "fetch_ad_data_task completion")
-        logging.info("🔒 LDAP connection closed for export.")
+        logging.info("[INFO] LDAP connection closed for export.")
 
     return ldap_map
 
