@@ -10,12 +10,19 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ### Added
 - In-memory ADP dedupe by `employeeID` with newest-record preference before provisioning/update processing.
 - Non-blocking duplicate-profile diagnostics (same name/title/department/manager with different employeeIDs).
+- Expanded provisioning conflict diagnostics:
+  - exact DN existence checks before classifying collisions,
+  - identifier conflict scans for `sAMAccountName`, `userPrincipalName`, and `mail`,
+  - full LDAP result payload logging for `result=68`.
 
 ### Changed
 - Provisioning now uses deterministic CN from first attempt: `displayName + employeeID token`.
 - `displayName` remains human-friendly while uniqueness is handled by CN/account identifiers.
 - CN collision handling now emits periodic cleanup diagnostics and re-checks existing user by `employeeID`.
 - Production log prefixes switched from emoji markers to ASCII tags (`[INFO]`, `[WARN]`, `[ERROR]`).
+- Provisioning retry behavior was tightened to avoid single-user retry storms:
+  - new `PROVISION_MAX_ADD_RETRIES` env var (default `15`),
+  - fail-fast path for `result=68` when no visible DN or identifier conflict is found.
 
 ### Planned
 - Complete and harden `scheduled_update_existing_users` for full production synchronization.

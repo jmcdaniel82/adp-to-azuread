@@ -34,6 +34,7 @@ app = func.FunctionApp()
 # - Scheduler defaults if unset/invalid:
 #   SYNC_HIRE_LOOKBACK_DAYS=4, UPDATE_LOOKBACK_DAYS=7, UPDATE_DRY_RUN=true.
 # - Provisioning collision tuning:
+#   PROVISION_MAX_ADD_RETRIES=15 caps create retries per user.
 #   CN_COLLISION_THRESHOLD=5 controls how often collision diagnostics are emitted.
 # - Duplicate profile diagnostics:
 #   ADP_PROFILE_DUP_WARN_LIMIT=25 limits non-blocking duplicate-profile warnings.
@@ -2034,6 +2035,85 @@ def _log_cn_conflict_inventory(conn, ldap_create_base: str, full_name: str, empl
         logging.warning(f"[WARN] CN collision diagnostics failed for employeeID {employee_id}: {e}")
 
 
+def _collect_identifier_conflicts(
+    conn,
+    ldap_search_base: str,
+    *,
+    employee_id: str,
+    sam_account_name: str,
+    user_principal_name: str,
+    mail: str,
+    max_entries: int = 8,
+) -> dict:
+    """
+    Collect conflicts for account identifiers that must be unique in AD.
+
+    Returns a dictionary with `sam`, `upn`, and `mail` conflict entry summaries.
+    """
+    if not conn or not ldap_search_base:
+        return {"sam": [], "upn": [], "mail": []}
+
+    employee_norm = (employee_id or "").strip().upper()
+    conflicts = {"sam": [], "upn": [], "mail": []}
+    checks = [
+        ("sam", ATTR_SAM_ACCOUNT_NAME, sam_account_name),
+        ("upn", ATTR_USER_PRINCIPAL_NAME, user_principal_name),
+        ("mail", ATTR_MAIL, mail),
+    ]
+
+    for key, attr, value in checks:
+        if not value:
+            continue
+        try:
+            escaped = escape_filter_chars(value)
+            found = conn.search(
+                ldap_search_base,
+                f"({attr}={escaped})",
+                SUBTREE,
+                attributes=[
+                    "distinguishedName",
+                    ATTR_EMPLOYEE_ID,
+                    ATTR_SAM_ACCOUNT_NAME,
+                    ATTR_USER_PRINCIPAL_NAME,
+                    ATTR_MAIL,
+                ],
+                size_limit=max_entries,
+            )
+            if not found or not conn.entries:
+                continue
+            for entry in conn.entries[:max_entries]:
+                existing_emp_id = (_entry_attr_value(entry, ATTR_EMPLOYEE_ID) or "").strip().upper()
+                if existing_emp_id and existing_emp_id == employee_norm:
+                    continue
+                dn = _entry_attr_value(entry, "distinguishedName") or str(getattr(entry, "entry_dn", ""))
+                sam_val = _entry_attr_value(entry, ATTR_SAM_ACCOUNT_NAME) or ""
+                upn_val = _entry_attr_value(entry, ATTR_USER_PRINCIPAL_NAME) or ""
+                mail_val = _entry_attr_value(entry, ATTR_MAIL) or ""
+                conflicts[key].append(
+                    f"dn='{dn}' employeeID='{existing_emp_id}' "
+                    f"sAMAccountName='{sam_val}' userPrincipalName='{upn_val}' mail='{mail_val}'"
+                )
+        except Exception as e:
+            logging.warning(f"[WARN] Identifier conflict lookup failed for {attr}='{value}': {e}")
+    return conflicts
+
+
+def _dn_exists_in_create_scope(conn, dn_candidate: str) -> bool:
+    """Return True if the exact DN currently resolves in AD."""
+    if not conn or not dn_candidate:
+        return False
+    try:
+        found = conn.search(
+            search_base=dn_candidate,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["distinguishedName"],
+        )
+        return bool(found and conn.entries)
+    except Exception:
+        return False
+
+
 def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, conn_factory=None):
     """Create and enable an AD user using data from ADP."""
     country_attrs = build_ad_country_attributes(extract_work_address_field(user_data, "countryCode"))
@@ -2193,7 +2273,11 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
 
     dn = None
     # Safety cap prevents infinite collision loops on duplicate names/identifiers.
-    max_retry_attempts = 50
+    max_retry_attempts_raw = os.getenv("PROVISION_MAX_ADD_RETRIES", "15")
+    try:
+        max_retry_attempts = max(1, int(max_retry_attempts_raw))
+    except ValueError:
+        max_retry_attempts = 15
     cn_collision_threshold_raw = os.getenv("CN_COLLISION_THRESHOLD", "5")
     try:
         cn_collision_threshold = max(1, int(cn_collision_threshold_raw))
@@ -2205,8 +2289,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
     sam_index = 0
     alias_index = 0
     cn_collision_count = 0
+    identifier_collision_count = 0
     employee_cn_token = sanitize_string_for_sam(emp_id) or emp_id.strip()
     cn_root = f"{full_name} {employee_cn_token}".strip()
+    cn_diagnostics_logged = False
 
     while retry_count < max_retry_attempts:
         if hasattr(conn, "bound") and not conn.bound:
@@ -2263,34 +2349,78 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         result = conn.result or {}
         msg = str(result.get("message") or "")
         if result.get("result") == 68:
-            # entryAlreadyExists here usually indicates DN/CN collision; retry by
-            # incrementing only CN suffix while preserving account identifiers.
-            cn_collision_count += 1
-            cn_index += 1
             retry_count += 1
-            if cn_collision_count % cn_collision_threshold == 0:
-                existing_dn = find_existing_user_dn(conn, emp_id)
-                if existing_dn:
-                    logging.info(
-                        f"[INFO] Existing user discovered during CN collision retries; "
-                        f"employeeID={emp_id} dn={existing_dn}"
-                    )
-                    manager_id = extract_manager_id(user_data)
-                    manager_dn = get_manager_dn(
-                        conn,
-                        ldap_search_base,
-                        manager_id,
-                        subject_employee_id=emp_id,
-                    )
-                    if manager_dn:
-                        conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
-                    return conn
-                _log_cn_conflict_inventory(conn, ldap_create_base, full_name, emp_id)
             logging.warning(
-                f"Add failed for {dn_candidate} (entryAlreadyExists on DN/CN); "
-                f"retrying with CN suffix {cn_index + 1} (employeeID={emp_id})"
+                f"[WARN] Add returned result=68 for {dn_candidate} (employeeID={emp_id}); "
+                f"result_payload={result}"
             )
-            continue
+
+            # If another process created this employee during retries, stop creating and switch to manager refresh.
+            existing_dn = find_existing_user_dn(conn, emp_id)
+            if existing_dn:
+                logging.info(
+                    f"[INFO] Existing user discovered during result=68 handling; "
+                    f"employeeID={emp_id} dn={existing_dn}"
+                )
+                manager_id = extract_manager_id(user_data)
+                manager_dn = get_manager_dn(
+                    conn,
+                    ldap_search_base,
+                    manager_id,
+                    subject_employee_id=emp_id,
+                )
+                if manager_dn:
+                    conn.modify(existing_dn, {"manager": [(MODIFY_REPLACE, [manager_dn])]})
+                return conn
+
+            dn_exists = _dn_exists_in_create_scope(conn, dn_candidate)
+            identifier_conflicts = _collect_identifier_conflicts(
+                conn,
+                ldap_search_base,
+                employee_id=emp_id,
+                sam_account_name=sam,
+                user_principal_name=f"{alias}@{upn_suffix}",
+                mail=f"{alias}@cfsbrands.com",
+            )
+            has_identifier_conflicts = any(identifier_conflicts.values())
+
+            if dn_exists:
+                cn_collision_count += 1
+                cn_index += 1
+                if not cn_diagnostics_logged or cn_collision_count % cn_collision_threshold == 0:
+                    _log_cn_conflict_inventory(conn, ldap_create_base, full_name, emp_id)
+                    cn_diagnostics_logged = True
+                logging.warning(
+                    f"Add failed for {dn_candidate} (result=68 with visible DN conflict); "
+                    f"retrying with CN suffix {cn_index + 1} (employeeID={emp_id})"
+                )
+                continue
+
+            if has_identifier_conflicts:
+                identifier_collision_count += 1
+                if identifier_conflicts["sam"]:
+                    sam_index += 1
+                    logging.warning(
+                        f"[WARN] result=68 identifier conflict on sAMAccountName for employeeID={emp_id}: "
+                        + " | ".join(identifier_conflicts["sam"])
+                    )
+                if identifier_conflicts["upn"] or identifier_conflicts["mail"]:
+                    alias_index += 1
+                    joined = identifier_conflicts["upn"] + identifier_conflicts["mail"]
+                    logging.warning(
+                        f"[WARN] result=68 identifier conflict on UPN/mail for employeeID={emp_id}: "
+                        + " | ".join(joined)
+                    )
+                continue
+
+            # No visible DN conflict and no identifier conflict: likely hidden object/ACL/replication issue.
+            logging.error(
+                f"[ERROR] result=68 for employeeID {emp_id} without visible CN/DN or identifier conflicts. "
+                f"Failing fast to avoid retry storm. Action: investigate hidden/deleted objects and ACL visibility "
+                f"under '{ldap_create_base}'."
+            )
+            _log_cn_conflict_inventory(conn, ldap_create_base, full_name, emp_id)
+            return conn
         if result.get("result") == 19:
             conflict_fields = _classify_account_id_conflicts(msg)
             if conflict_fields:
@@ -2366,7 +2496,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         logging.error(
             f"Add failed for employeeID {emp_id}: exceeded unique add retries "
             f"(cn_root='{cn_root}', cn_index={cn_index}, sam_index={sam_index}, "
-            f"alias_index={alias_index}, cn_collision_count={cn_collision_count}). "
+            f"alias_index={alias_index}, cn_collision_count={cn_collision_count}, "
+            f"identifier_collision_count={identifier_collision_count}). "
             f"Action: inspect existing AD objects under '{ldap_create_base}' for conflicting CN/UPN/mail values."
         )
         return conn
