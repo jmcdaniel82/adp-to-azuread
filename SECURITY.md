@@ -11,3 +11,9 @@ The latest code on the `main` branch receives security updates. Older commits or
 ## Response Times
 
 We aim to acknowledge received reports within five business days. After triage, we will work with you to understand the issue and plan for a fix. When a patch is released we will credit those who responsibly disclosed the vulnerability.
+
+## Secret Handling Notes
+
+- Do not commit `local.settings.json`, certificates, private keys, or live credentials.
+- Use `local.settings.example.json` only as a placeholder template for local setup.
+- Store deployed secrets in Azure App Settings or a managed secret store such as Key Vault.

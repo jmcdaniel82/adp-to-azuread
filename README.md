@@ -34,6 +34,8 @@ app/
 function_app.py             # host shim importing app from app.function_app
 ```
 
+Azure Functions Python v2 discovery still happens from the repository root through `function_app.py`, while the decorated handlers and service orchestration live under `app/`.
+
 ## Behavioral Invariants Preserved
 
 The refactor intentionally preserves these rules:
@@ -60,9 +62,8 @@ The refactor intentionally preserves these rules:
 
 ## Configuration
 
-Set values in Azure App Settings or the sanitized local template files:
+Set values in Azure App Settings for deployed environments. For local development, copy `local.settings.example.json` to the ignored `local.settings.json` file and add your local secrets there.
 
-- `local.settings.json`
 - `local.settings.example.json`
 
 ### ADP
@@ -107,6 +108,11 @@ pip install -r requirements.txt
 func start --verbose
 ```
 
+Recommended local defaults:
+
+- keep `UPDATE_DRY_RUN=true` unless you are explicitly validating live update writes in a safe environment,
+- point all ADP and LDAP settings at non-production systems before running timers locally.
+
 ## Tests
 
 ```powershell
@@ -126,17 +132,27 @@ Current tests cover:
 
 Staging validation steps are documented in [docs/staging-smoke-checklist.md](docs/staging-smoke-checklist.md).
 
-## Deployment
+## CI and Deployment
+
+Repository verification runs in:
+
+- `.github/workflows/verify.yml`
+- `.github/workflows/main_adp-to-azuread.yml`
+
+The deployment workflow targets the Azure Function App `adp-to-azuread` after verification passes.
+
+Manual publish remains:
 
 ```powershell
-func azure functionapp publish <APP_NAME> --python
+func azure functionapp publish adp-to-azuread --python
 ```
 
 ## Security Notes
 
 - Do not commit real credentials/certificates.
 - Keep production secrets in Azure App Settings / Key Vault.
-- `local.settings.json` in this repo is sanitized and intended only as a placeholder template.
+- `local.settings.json` is for local-only secrets and should remain untracked.
+- Use `local.settings.example.json` as the committed template.
 - See `SECURITY.md` for responsible disclosure.
 
 ## License

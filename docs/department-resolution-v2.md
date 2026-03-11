@@ -2,7 +2,8 @@
 
 This document describes the department proposal logic used by:
 
-- `scheduled_update_existing_users` in `function_app.py`
+- `scheduled_update_existing_users` via `app/updates.py`
+- `app/department_resolution.py`
 - `generate_adp_current_vs_scheduled_department_report.py`
 
 ## Canonical Departments

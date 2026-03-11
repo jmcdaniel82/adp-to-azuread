@@ -6,6 +6,8 @@ Script: `build_dry_run_change_report_excel.py`
 
 Build an Excel workbook from a dry-run CSV where each worksheet lists only users who would change for a given field/group.
 
+This is an offline analysis helper for `scheduled_update_existing_users` dry-run output. It is not part of the deployed Azure Functions surface.
+
 ## Usage
 
 ```powershell

@@ -48,9 +48,10 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 
 - Added repo-local quality gate configuration via `pyproject.toml` for `ruff` and `mypy`.
 - Added CI verification workflow for tests, `py_compile`, lint, and type checks.
-- Hardened deployment workflows so both existing Azure deployment pipelines run verification before packaging.
-- Sanitized `local.settings.json` and added `local.settings.example.json` placeholder templates for merge safety.
+- Hardened the Azure deployment workflow so verification runs before packaging and publish.
+- Added `local.settings.example.json` as the committed local configuration template while keeping `local.settings.json` out of source control.
 - Added staging smoke-test checklist for timer jobs, HTTP routes, ADP token retrieval, and LDAP bind/rebind validation.
+- Updated repository documentation to reflect the new package layout, Azure Functions v2 root shim, CI gates, and local secret-handling expectations.
 
 ### Added
 
@@ -65,9 +66,6 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - `exists`, `created`, `manager_missing`, `skipped_country`, `skipped_missing_required_fields`,
   - `add_failures`, `password_failures`, `duration_ms`.
 - Processing log lines now include formatted start date (`Start Date='M/D/YYYY'`).
-
-### Changed
-
 - Provisioning now uses deterministic CN from first attempt: `displayName + employeeID token`.
 - `displayName` remains human-friendly while uniqueness is handled by CN/account identifiers.
 - CN collision handling now emits periodic cleanup diagnostics and re-checks existing user by `employeeID`.

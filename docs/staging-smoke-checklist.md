@@ -1,6 +1,6 @@
 # Staging Smoke Checklist
 
-Use this checklist after deployment to a staging Function App with staging ADP and LDAP credentials.
+Use this checklist after deployment to a staging Function App with staging ADP and LDAP credentials. If you mirror production naming, the target app may be a staging companion to `adp-to-azuread`, but the checks below apply to any staging slot or separate staging app.
 
 ## Preconditions
 
@@ -9,7 +9,8 @@ Use this checklist after deployment to a staging Function App with staging ADP a
   - `ADP_CERT_PEM`, `ADP_CERT_KEY`
   - `LDAP_SERVER`, `LDAP_USER`, `LDAP_PASSWORD`, `LDAP_SEARCH_BASE`, `LDAP_CREATE_BASE`
   - `CA_BUNDLE_PATH`
-- Confirm `UPDATE_DRY_RUN=true` before testing the update timer path.
+- For local smoke runs, start from `local.settings.example.json` and place real staging secrets only in the ignored `local.settings.json`.
+- Confirm `UPDATE_DRY_RUN=true` before testing the update timer path. This is the intended default and should remain explicit in staging app settings.
 - Confirm staging AD bind account can read and create in the intended OU.
 
 ## 1. ADP Token Retrieval
@@ -73,4 +74,3 @@ Use this checklist after deployment to a staging Function App with staging ADP a
 - Update dry-run emits only simulated changes.
 - No secrets appear in logs.
 - No unexpected writes occur outside intended staging scope.
-
