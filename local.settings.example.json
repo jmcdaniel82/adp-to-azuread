@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AzureWebJobsDashboard": "UseDevelopmentStorage=true",
+    "ADP_TOKEN_URL": "https://accounts.adp.com/auth/oauth/v2/token",
+    "ADP_CLIENT_ID": "<set-in-local-secret-store>",
+    "ADP_CLIENT_SECRET": "<set-in-local-secret-store>",
+    "ADP_CERT_PEM": "C:\\cert\\adp-client-cert.pem",
+    "ADP_CERT_KEY": "C:\\cert\\adp-client-cert.key",
+    "ADP_EMPLOYEE_URL": "https://api.adp.com/hr/v2/workers",
+    "LDAP_SERVER": "<set-your-ldap-host>",
+    "LDAP_USER": "<set-your-domain-user>",
+    "LDAP_PASSWORD": "<set-in-local-secret-store>",
+    "LDAP_SEARCH_BASE": "DC=example,DC=com",
+    "LDAP_CREATE_BASE": "OU=Users,DC=example,DC=com",
+    "CA_BUNDLE_PATH": "C:\\cert\\corp-ca-bundle.pem",
+    "UPDATE_DRY_RUN": "true",
+    "PYTHON_ENABLE_DEBUGPY": "1"
+  }
+}

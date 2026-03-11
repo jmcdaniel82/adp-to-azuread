@@ -7,15 +7,67 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 
 ## [Unreleased]
 
+### Refactored
+
+- Replaced monolithic `function_app.py` with a package-oriented architecture under `app/`:
+  - `app/function_app.py` (thin trigger/route wiring)
+  - `app/config.py`, `app/constants.py`, `app/models.py`
+  - `app/security.py`, `app/adp_client.py`, `app/ldap_client.py`
+  - `app/department_resolution.py`, `app/provisioning.py`, `app/updates.py`, `app/export_routes.py`
+- Root `function_app.py` is now a host shim that imports `app` from `app.function_app`.
+
+### Security
+
+- Hardened cert/key secret handling:
+  - env-provided PEM/base64 cert/key material is written to managed temp files,
+  - deterministic cleanup of generated temp files on process exit,
+  - no secret payload logging.
+- Centralized CA bundle resolution for ADP and LDAP TLS verification paths.
+
+### Tests
+
+- Replaced legacy monolithic test file with focused test modules:
+  - `tests/test_department_resolution.py`
+  - `tests/test_config.py`
+  - `tests/test_adp_client.py`
+  - `tests/test_updates.py`
+  - `tests/test_provisioning.py`
+  - `tests/test_entrypoint_smoke.py`
+  - `tests/test_security.py`
+- Added explicit coverage for:
+  - Department Resolution V2 guardrails and fallback chain,
+  - update denylist protections for create-time email identifiers,
+  - dry-run and no-change update paths,
+  - config defaulting and invalid env fallback,
+  - ADP retry helper behavior,
+  - provisioning fail-fast on unresolved `result=68` collision scenarios,
+  - root Azure Functions entrypoint smoke import/export checks,
+  - temp-file cleanup for secret-backed PEM/base64 inputs.
+
+### Changed
+
+- Added repo-local quality gate configuration via `pyproject.toml` for `ruff` and `mypy`.
+- Added CI verification workflow for tests, `py_compile`, lint, and type checks.
+- Hardened deployment workflows so both existing Azure deployment pipelines run verification before packaging.
+- Sanitized `local.settings.json` and added `local.settings.example.json` placeholder templates for merge safety.
+- Added staging smoke-test checklist for timer jobs, HTTP routes, ADP token retrieval, and LDAP bind/rebind validation.
+
 ### Added
+
 - In-memory ADP dedupe by `employeeID` with newest-record preference before provisioning/update processing.
 - Non-blocking duplicate-profile diagnostics (same name/title/department/manager with different employeeIDs).
 - Expanded provisioning conflict diagnostics:
   - exact DN existence checks before classifying collisions,
   - identifier conflict scans for `sAMAccountName`, `userPrincipalName`, and `mail`,
   - full LDAP result payload logging for `result=68`.
+- Rich end-of-run provisioning summary with grouped operational counters:
+  - `adp_total`, `deduped_dropped`, `hires_in_window`, `processed`,
+  - `exists`, `created`, `manager_missing`, `skipped_country`, `skipped_missing_required_fields`,
+  - `add_failures`, `password_failures`, `duration_ms`.
+- Processing log lines now include formatted start date (`Start Date='M/D/YYYY'`).
 
 ### Changed
+
 - Provisioning now uses deterministic CN from first attempt: `displayName + employeeID token`.
 - `displayName` remains human-friendly while uniqueness is handled by CN/account identifiers.
 - CN collision handling now emits periodic cleanup diagnostics and re-checks existing user by `employeeID`.
@@ -25,15 +77,18 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - fail-fast path for `result=68` when no visible DN or identifier conflict is found.
 
 ### Planned
+
 - Complete and harden `scheduled_update_existing_users` for full production synchronization.
 - Finalize operational guardrails and runbook for update-mode rollout (`UPDATE_DRY_RUN=false`).
 
 ## [0.2.0] - In Progress
 
 ### Goal
+
 - Fully functional `scheduled_update_existing_users` as the second major milestone after provisioning.
 
 ### Scope
+
 - Promote update flow from dry-run-first behavior to production-ready AD writes with safe rollout controls.
 - Ensure reliable update filtering and coverage:
   - `UPDATE_LOOKBACK_DAYS`
@@ -48,21 +103,25 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Document go-live checklist and rollback procedure for update mode.
 
 ### Notes
+
 - This version is intentionally tracked as an active milestone and is not yet released.
 
 ## [0.1.1] - 2026-03-11
 
 ### Added
+
 - Provisioning safeguard for repeated CN/DN collisions:
   - New environment variable `CN_COLLISION_THRESHOLD` (default `10`).
   - After threshold collisions (`LDAP result=68`), CN generation switches to an employee-ID-based CN root (for example, `Full Name 1234`) to reduce duplicate-name contention.
 
 ### Changed
+
 - Provisioning logs now include clearer, actionable diagnostics when:
   - CN collision threshold is exceeded and fallback naming is activated.
   - Unique-add retries are exhausted, including explicit guidance to inspect conflicting `CN`/`UPN`/`mail` values.
 
 ### Documentation
+
 - Expanded inline comments and docstrings in `function_app.py` for:
   - business-rule guardrails,
   - environment/config assumptions,
@@ -72,9 +131,11 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ## [0.1.0] - 2026-03-11
 
 ### Milestone
+
 - `scheduled_provision_new_hires` completed to a functional production state.
 
 ### Added
+
 - Azure Functions runtime with provisioning-first delivery:
   - `scheduled_provision_new_hires` for AD user provisioning from ADP (functional).
   - Initial `scheduled_update_existing_users` framework in dry-run-first mode.
@@ -89,6 +150,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - `build_dry_run_change_report_excel.py`
 
 ### Provisioning Highlights
+
 - New-hire filtering by `SYNC_HIRE_LOOKBACK_DAYS` with UTC date windowing.
 - Existing-user detection by `employeeID` to prevent duplicate account creation.
 - Controlled add retry behavior for AD collisions and reconnect handling.
@@ -96,15 +158,18 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Post-create account setup workflow (password set + enable path) with explicit failure logging.
 
 ### Changed
+
 - Update synchronization guardrails were introduced but remain part of the in-progress `0.2.0` milestone.
 
 ### Security
+
 - TLS certificate validation enabled for ADP and LDAP connections with configurable CA bundle paths.
 - LDAP bind/account operations include controlled error handling and connection cleanup paths.
 
 ## [0.0.9] - 2025-12-02
 
 ### Changed
+
 - Continued stabilization updates in `function_app.py` through November and early December.
 - Removed legacy `HttpTrigger1` implementation files (`HttpTrigger1/__init__.py`, `HttpTrigger1/function.json`) as the app standardized on `function_app.py`.
 - Normalized local Azurite config placement/usage and local debug setup files (`AzuriteConfig`, `.vscode/launch.json`) during October-November cleanup.
@@ -112,16 +177,19 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ## [0.0.8] - 2025-08-18
 
 ### Added
+
 - Security scanning workflows:
   - `.github/workflows/codeql.yml`
   - `.github/workflows/defender-for-devops.yml`
 
 ### Changed
+
 - High-volume iterative updates to `function_app.py` across July-August for provisioning/update behavior refinement and runtime stability.
 
 ## [0.0.7] - 2025-07-31
 
 ### Changed
+
 - Continued application logic iterations in `function_app.py` through July.
 - Dependency update:
   - `requests` bumped from `2.32.2` to `2.32.4`.
@@ -130,6 +198,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ## [0.0.6] - 2025-06-12
 
 ### Added
+
 - Developer environment scaffolding:
   - `.funcignore`
   - `.vscode/extensions.json`
@@ -139,25 +208,30 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Azure App Service build/deploy workflow updates for CI/CD.
 
 ### Documentation
+
 - Added descriptive function docstrings and expanded inline code documentation in `function_app.py`.
 
 ### Changed
+
 - Continued service behavior and data-mapping updates in `function_app.py`.
 
 ## [0.0.5] - 2025-06-05
 
 ### Added
+
 - `SECURITY.md` policy and follow-up updates.
 - MIT license with corporate-use updates.
 - Unit tests and workflow integration for `pytest`.
 
 ### Security
+
 - Enforced function authentication settings.
 - Removed internal debug endpoints.
 - Reduced sensitive logging exposure in LDAP-related debug output.
 - Removed tracked Azurite debug logs and updated ignore behavior.
 
 ### Changed
+
 - Improved resilience and exception handling:
   - LDAP connection failure handling.
   - ADP employee request exception handling.
@@ -168,6 +242,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Standardized formatting/newline consistency and cleaned `requirements.txt`.
 
 ### Dependencies
+
 - Bumped core packages:
   - `azure-functions` `1.14.0 -> 1.22.1`
   - `msal` `1.22.0 -> 1.32.3`
@@ -180,25 +255,30 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ## [0.0.4] - 2025-03-12
 
 ### Added
+
 - Initial project `README.md` and subsequent documentation updates.
 
 ### Changed
+
 - Updated early `main.py` implementation and dependency definitions.
 - Added/updated Azure App Service build/deployment workflow configuration.
 
 ## [0.0.3] - 2025-02-10
 
 ### Changed
+
 - Refactored Azure Function setup and refreshed dependency baseline.
 
 ## [0.0.2] - 2025-01-30
 
 ### Added
+
 - `dependabot.yml` for automated dependency update PRs.
 - Early Azure App Service build/deployment workflow configuration.
 
 ## [0.0.1] - 2025-01-29
 
 ### Added
+
 - Initial commit of ADP-to-Entra provisioning function.
 - Initial `main.py` implementation and baseline `requirements.txt`.

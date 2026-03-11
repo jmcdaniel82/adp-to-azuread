@@ -1,75 +1,69 @@
-# ADP to Azure AD / Local AD Sync
+# ADP to Active Directory Sync (Azure Functions)
 
-This Azure Functions project syncs worker data from ADP Workforce Now into on-prem Active Directory over LDAPS.
+This project syncs ADP Workforce Now worker data into on-prem Active Directory over LDAPS.
 
-## What It Does
+## Overview
 
-- Provisions new users from ADP (`scheduled_provision_new_hires` timer trigger).
-- Compares and updates existing AD users from ADP (`scheduled_update_existing_users`, dry run by default).
-- Exposes HTTP endpoints for payload inspection and mapping diagnostics:
-  - `POST /api/process`
-  - `GET /api/export`
-- Generates an offline department-change report with manager context and audit fields.
+The application has two timer jobs and two HTTP diagnostics routes:
 
-## Provisioning Behavior
+- `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
+- `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
+- `POST /api/process` returns active ADP worker snapshots.
+- `GET /api/export` returns ADP-vs-AD department and employeeID diagnostics.
 
-- New-hire provisioning only processes hires in the `SYNC_HIRE_LOOKBACK_DAYS` window.
-- User creation enforces uniqueness by retrying only the conflicting identifier:
-  - CN/DN collisions increment CN/displayName suffix only.
-  - `sAMAccountName` collisions increment sAM suffix only (still max 10 chars).
-  - `userPrincipalName` collisions increment email/UPN alias suffix only.
-- Country fields are written as an AD triplet when country is present:
-  - `co` (display name)
-  - `c` (alpha-2 code)
-  - `countryCode` (numeric ISO code when mapped)
-- Manager assignment is by manager `employeeID`; if ADP provides a manager ID with no AD match, a warning is logged.
+## Architecture
 
-## Synced AD Attributes
+The previous monolithic `function_app.py` has been split into a package-first structure:
 
-- `employeeID`
-- `cn`
-- `displayName`
-- `givenName`
-- `sn`
-- `sAMAccountName`
-- `userPrincipalName`
-- `mail`
-- `title`
-- `department`
-- `company`
-- `manager`
-- `l`
-- `st`
-- `postalCode`
-- `streetAddress`
-- `co`
-- `c`
-- `countryCode`
-- `userAccountControl`
+```text
+app/
+  __init__.py
+  function_app.py           # thin Azure trigger/route wiring only
+  azure_compat.py           # local/test import shim when azure-functions is unavailable
+  constants.py              # LDAP attributes, deny lists, defaults
+  config.py                 # typed env parsing and defaults
+  models.py                 # TypedDict/dataclass models
+  reporting.py              # shared stats helpers
+  security.py               # cert/key materialization + deterministic temp cleanup
+  adp_client.py             # ADP auth, retries, pagination, worker parsing
+  department_resolution.py  # Department Resolution V2 engine
+  ldap_client.py            # LDAP connection, diff/modify, guardrails, diagnostics
+  provisioning.py           # new-hire create orchestration
+  updates.py                # existing-user update orchestration
+  export_routes.py          # HTTP route handlers
+function_app.py             # host shim importing app from app.function_app
+```
 
-## Department Resolution (V2)
+## Behavioral Invariants Preserved
 
-Department mapping now uses a candidate/confidence model with guardrails:
+The refactor intentionally preserves these rules:
 
-- Canonical departments:
-  - `Administration`
-  - `Engineering`
-  - `Finance`
-  - `Human Resources`
-  - `Information Technology`
-  - `Operations`
-  - `Sales`
-  - `Supply Chain`
-- `Customer Service*` assigned department values resolve to `Sales`.
-- Ambiguous labels (for example `Professionals`, `First/Mid-Level Officials and Managers`) do not force `Administration`.
-- `Administration` requires strong evidence (admin-coded assigned dept, manager in Administration, or strong admin title signal).
-- If current AD department equals manager department, low-confidence evidence cannot override it.
+- `scheduled_provision_new_hires` remains functional.
+- `scheduled_update_existing_users` remains dry-run by default (`UPDATE_DRY_RUN=true`).
+- Update sync never modifies create-time-only email routing identifiers:
+  - `mail`, `userPrincipalName`, `mailNickname`, `proxyAddresses`, `targetAddress`, and related aliases.
+- Department Resolution V2 remains intact:
+  - canonical mapping,
+  - `Customer Service* -> Sales` override,
+  - ambiguous-value handling,
+  - Administration gating,
+  - manager-alignment guardrail,
+  - fallback/audit fields.
+- Provisioning collision handling keeps deterministic CN-by-employeeID behavior and conflict-specific retry handling.
 
-Detailed logic and audit fields are documented in `docs/department-resolution-v2.md`.
+## Security Hardening
+
+- Certificate/key env material is resolved through `app.security.ensure_file_from_env`.
+- Temp cert/key files are tracked and cleaned deterministically via an `atexit` cleanup hook.
+- Secret content is never logged.
+- CA bundle resolution is centralized for both ADP and LDAP TLS verification.
 
 ## Configuration
 
-Set these environment variables in Azure App Settings or `local.settings.json` (`Values`):
+Set values in Azure App Settings or the sanitized local template files:
+
+- `local.settings.json`
+- `local.settings.example.json`
 
 ### ADP
 
@@ -78,8 +72,8 @@ Set these environment variables in Azure App Settings or `local.settings.json` (
 - `ADP_CLIENT_ID`
 - `ADP_CLIENT_SECRET`
 - `ADP_CERT_PEM`
-- `ADP_CERT_KEY`
-- Optional: `ADP_CA_BUNDLE_PATH`
+- `ADP_CERT_KEY` (optional)
+- `ADP_CA_BUNDLE_PATH` (optional)
 
 ### LDAP / AD
 
@@ -87,108 +81,63 @@ Set these environment variables in Azure App Settings or `local.settings.json` (
 - `LDAP_USER`
 - `LDAP_PASSWORD`
 - `LDAP_SEARCH_BASE`
-- `LDAP_CREATE_BASE`
+- `LDAP_CREATE_BASE` (required for provisioning)
 - `CA_BUNDLE_PATH`
 - `UPN_SUFFIX`
 
+### Provisioning Job
+
+- `SYNC_HIRE_LOOKBACK_DAYS` (default `4`)
+- `PROVISION_MAX_ADD_RETRIES` (default `15`)
+- `CN_COLLISION_THRESHOLD` (default `5`)
+
 ### Update Job
 
-- `UPDATE_DRY_RUN` (default: `true`)
-- `UPDATE_LOOKBACK_DAYS` (default: `7`)
-- `UPDATE_INCLUDE_MISSING_LAST_UPDATED` (default: `true`)
-- `UPDATE_LOG_NO_CHANGES` (default: `false`)
-- Optional: `LOG_DEPARTMENT_MAPPING`
-
-### Hire Provisioning Job
-
-- `SYNC_HIRE_LOOKBACK_DAYS` (default: `4`)
+- `UPDATE_DRY_RUN` (default `true`)
+- `UPDATE_LOOKBACK_DAYS` (default `7`)
+- `UPDATE_INCLUDE_MISSING_LAST_UPDATED` (default `true`)
+- `UPDATE_LOG_NO_CHANGES` (default `false`)
 
 ## Local Run
-
-1. Create and activate a virtual environment.
-2. Install dependencies.
-3. Start Azurite if you run timer triggers locally.
-4. Start Functions host.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-azurite --location ./azurite --silent --debug ./azurite/debug.log
 func start --verbose
 ```
 
-## Generate Department Change Report
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe generate_adp_current_vs_scheduled_department_report.py
-```
-
-Generated report artifacts (local, not source-controlled):
-
-- `adp_active_users_ad_current_vs_scheduled_department.csv`
-- `adp_active_users_ad_current_vs_scheduled_department_summary.json`
-- optional: `adp_active_users_ad_current_vs_scheduled_department_changes_only.csv`
-
-Report includes:
-
-- current AD department
-- manager and manager department
-- proposed department (V2)
-- change guardrail outcome (`changeAllowed`, `blockReason`)
-- winning evidence and confidence
-- reason trace fields for auditability
-
-## Build Excel Dry-Run Change Workbook
-
-Use this when you want field-specific worksheets with only impacted users:
-
-```powershell
-.\.venv\Scripts\python.exe build_dry_run_change_report_excel.py `
-  --input adp_active_users_ad_current_vs_scheduled_department.csv `
-  --output dry_run_change_report.xlsx
-```
-
-Notes:
-
-- Input must be a dry-run CSV with one row per user.
-- The script always builds `README` and `Summary` tabs.
-- It builds dedicated tabs for EmployeeID/Name/Title/Department/Manager changes.
-- For fields not present in input, tabs are still created with a “no changes / columns missing” note.
-- Department tabs include risk flags and change-driver grouping.
-
-Detailed workbook behavior is documented in `docs/dry-run-excel-report.md`.
-
 ## Tests
-
-Install test/lint tools (optional):
-
-```powershell
-pip install pytest flake8
-```
-
-Run:
 
 ```powershell
 pytest -q
-flake8
+ruff check app tests function_app.py
+mypy app
 ```
 
-## Deployment
+Current tests cover:
 
-Manual publish:
+- Department Resolution V2 high-risk rules.
+- Update guardrails (denylist, dry-run, no-change path).
+- Config/env parsing defaults and invalid fallback behavior.
+- ADP retry behavior for retryable and non-retryable outcomes.
+- Provisioning collision fail-fast and deterministic CN behavior.
+- Secret materialization/cleanup behavior for PEM/base64 env values.
+
+Staging validation steps are documented in [docs/staging-smoke-checklist.md](docs/staging-smoke-checklist.md).
+
+## Deployment
 
 ```powershell
 func azure functionapp publish <APP_NAME> --python
 ```
 
-This repo also includes GitHub Actions workflows for deployment on pushes to `main`.
+## Security Notes
 
-## Security
-
-See `SECURITY.md` for responsible disclosure.
+- Do not commit real credentials/certificates.
+- Keep production secrets in Azure App Settings / Key Vault.
+- `local.settings.json` in this repo is sanitized and intended only as a placeholder template.
+- See `SECURITY.md` for responsible disclosure.
 
 ## License
 

@@ -35,9 +35,25 @@ jobs:
           source venv/bin/activate
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install pytest ruff mypy types-requests
 
-      # Optional: Add step to run tests here
+      - name: Run verification suite
+        run: |
+          pytest -q
+          python - <<'PY'
+          import pathlib
+          import py_compile
+          files = [pathlib.Path("function_app.py")]
+          files.extend(sorted(pathlib.Path("app").glob("*.py")))
+          files.extend(sorted(pathlib.Path("tests").glob("*.py")))
+          for path in files:
+              py_compile.compile(str(path), doraise=True)
+          print(f"compiled {len(files)} Python files")
+          PY
+          ruff check app tests function_app.py
+          mypy app
 
       - name: Zip artifact for deployment
         run: zip release.zip ./* -r
