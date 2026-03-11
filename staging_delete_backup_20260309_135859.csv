@@ -1,0 +1,7 @@
+"employeeID","SamAccountName","DisplayName","Enabled","whenCreated","whenChanged","DistinguishedName"
+"3PXBIVRVI","dboyd","Donald Boyd","True","3/5/2026 10:32:26 AM","3/5/2026 11:48:10 AM","CN=Donald Boyd,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"
+"M050JECT9","lharsch","Lisa Harsch","True","3/5/2026 12:17:19 PM","3/5/2026 1:18:10 PM","CN=Lisa Harsch,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"
+"HQEF4WIGN","mnormand","Mathew Normand","True","2/26/2026 7:47:11 AM","2/26/2026 8:47:59 AM","CN=Mathew Normand,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"
+"EN0TROSTE","jpudelko","Jackie Pudelko","True","2/27/2026 7:33:02 AM","2/27/2026 8:18:00 AM","CN=Jackie Pudelko,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"
+"QOKD9JMXG","sriley","Stefan Riley","True","3/5/2026 10:32:27 AM","3/5/2026 11:48:10 AM","CN=Stefan Riley,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"
+"ZHYVFWBYD","nvermote","Nicole Vermote","True","2/27/2026 11:03:01 AM","2/27/2026 11:48:00 AM","CN=Nicole Vermote,OU=US-Staging,OU=US.Employees,DC=us,DC=corp,DC=cfsbrands,DC=com"

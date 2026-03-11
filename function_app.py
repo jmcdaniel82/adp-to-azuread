@@ -24,6 +24,16 @@ app = func.FunctionApp()
 # 1) Timer jobs pull workers from ADP and then either provision or update AD users via LDAPS.
 # 2) HTTP routes expose diagnostic payloads for department mapping/export verification.
 # 3) Department mapping logic is centralized in resolve_local_ac_department() and reused by update paths.
+#
+# Environment/config assumptions:
+# - ADP auth requires: ADP_TOKEN_URL, ADP_CLIENT_ID, ADP_CLIENT_SECRET, ADP_CERT_PEM
+#   Optional: ADP_CERT_KEY, ADP_CA_BUNDLE_PATH.
+# - LDAP operations require: LDAP_SERVER, LDAP_USER, LDAP_PASSWORD, LDAP_SEARCH_BASE.
+#   Provisioning also requires: LDAP_CREATE_BASE.
+# - Scheduler defaults if unset/invalid:
+#   SYNC_HIRE_LOOKBACK_DAYS=4, UPDATE_LOOKBACK_DAYS=7, UPDATE_DRY_RUN=true.
+# - Provisioning collision tuning:
+#   CN_COLLISION_THRESHOLD=10 triggers employee-ID-based CN fallback naming.
 
 # HTTP/LDAP retry and timeout defaults for outbound network calls.
 ADP_HTTP_TIMEOUT_SECONDS = 10
@@ -115,6 +125,7 @@ def ensure_file_from_env(env_name: str, suffix: str) -> Optional[str]:
             logging.info(f"{env_name} appears to be base64; wrote decoded data to temp file {tmp.name}")
             return tmp.name
     except Exception:
+        # Base64 decoding is best-effort; unrecognized content falls through to warning/None.
         pass
 
     # Fallback: return None for unknown formats
@@ -169,6 +180,7 @@ def _log_ldap_target_details(context: str, host: str, ca_bundle: str, port: int 
         if resolved:
             logging.info(f"{context} LDAP DNS '{host}' resolved to: {', '.join(resolved)}")
     except Exception as e:
+        # DNS lookup diagnostics are non-critical and should never block the caller.
         logging.warning(f"{context} LDAP DNS resolution failed for '{host}': {e}")
 
 
@@ -195,6 +207,7 @@ def _request_with_retries(
         try:
             response = requests.request(method, url, timeout=timeout, **kwargs)
         except requests.RequestException as e:
+            # Treat transport failures as transient until retry budget is exhausted.
             if attempt >= max_attempts:
                 logging.error(f"{action_label} failed after {attempt} attempts: {e}")
                 return None
@@ -236,6 +249,7 @@ def parse_datetime(value: str, context: str) -> Optional[datetime]:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
     except Exception as e:
+        # Invalid or non-ISO values are handled gracefully by returning None.
         logging.error(f"Error parsing {context} '{value}': {e}")
         return None
 
@@ -328,6 +342,7 @@ def get_adp_token() -> Optional[str]:
     try:
         body = resp.json()
     except json.JSONDecodeError:
+        # Token endpoint contract requires JSON; fail fast when payload is malformed.
         logging.error(f"ADP token response was not JSON: {resp.text}")
         return None
     token = body.get("access_token")
@@ -1060,7 +1075,15 @@ def resolve_local_ac_department(
     current_ad_department: str = "",
     manager_department: str = "",
 ) -> dict:
-    """Resolve department with candidate scoring, confidence, and guardrails."""
+    """
+    Resolve department with candidate scoring, confidence, and guardrails.
+
+    Business rules that are easy to miss:
+    - Prefer high-confidence direct signals over inferred/ambiguous signals.
+    - Do not override a manager-aligned current department with low-confidence evidence.
+    - Gate Administration assignments unless explicit admin evidence is present.
+    - Fall back to current -> manager -> title when evidence is weak/ambiguous.
+    """
     signals = _collect_local_ac_department_signals(emp)
     title = extract_business_title(emp) or extract_assignment_field(emp, "jobTitle") or ""
     title_info = infer_department_from_title(title)
@@ -1136,6 +1159,8 @@ def resolve_local_ac_department(
         source in _LOW_CONFIDENCE_FIELDS and _is_ambiguous_reference_value(raw_value)
         for source, raw_value in signals
     ) or _is_ambiguous_reference_value(legacy_department)
+    # Guardrail: keep the current department when manager/current align and only
+    # weak or ambiguous evidence suggests a different value.
     if (
         current_norm
         and manager_norm
@@ -1157,6 +1182,8 @@ def resolve_local_ac_department(
             "departmentChangeReasonTrace": chosen["reasonTrace"],
         }
 
+    # Guardrail: "Administration" is intentionally conservative because broad
+    # labels in ADP can over-classify users into admin.
     if chosen["department"] == "Administration" and not admin_allowed:
         fallback = _fallback_from_context(
             current_department=current_ad_department,
@@ -1178,6 +1205,7 @@ def resolve_local_ac_department(
             "departmentChangeReasonTrace": chosen["reasonTrace"],
         }
 
+    # Guardrail: ambiguous reference values should not force a department change.
     if chosen["ambiguousReference"]:
         fallback = _fallback_from_context(
             current_department=current_ad_department,
@@ -1384,6 +1412,7 @@ def get_manager_dn(conn, ldap_search_base, manager_id, subject_employee_id: str 
             attributes=["distinguishedName"],
         )
     except Exception as e:
+        # Manager lookup errors should not block downstream processing of the worker.
         logging.warning(f"Manager lookup failed for {manager_id}: {e}")
         return None
     if not found:
@@ -1424,6 +1453,7 @@ def get_department_by_dn(conn, dn: str) -> str:
             dept = conn.entries[0].department.value if conn.entries[0].department else None
             return (dept or "").strip()
     except Exception:
+        # Department enrichment is optional; return empty when lookup fails.
         return ""
     return ""
 
@@ -1486,6 +1516,7 @@ def get_adp_employees(token: str, limit: int = 50, offset: int = 0, paginate_all
         try:
             data = response.json()
         except json.JSONDecodeError:
+            # ADP workers endpoint must return JSON for pagination to proceed.
             logging.error(f"Failed to decode JSON from ADP response: {response.text}")
             return None
 
@@ -1611,6 +1642,7 @@ def _safe_unbind(conn, context: str):
     try:
         conn.unbind()
     except Exception as e:
+        # Cleanup failures should be logged but must not raise during shutdown paths.
         logging.warning(f"LDAP unbind failed during {context}: {e}")
 
 
@@ -1645,6 +1677,7 @@ def _entry_attr_value(entry, attr: str):
             return getattr(entry, attr).value
         return entry[attr].value
     except Exception:
+        # Missing/invalid attributes are expected in heterogeneous directory data.
         return None
 
 
@@ -1761,6 +1794,7 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
         if conn.modify(dn, changes):
             return conn
     except Exception as e:
+        # Retry once with a fresh connection when modify raises unexpectedly.
         logging.error(f"Modify raised exception for {dn}: {e}")
         if conn_factory:
             try:
@@ -1769,6 +1803,7 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
                 if conn.modify(dn, changes):
                     return conn
             except Exception as reconnect_error:
+                # Preserve current connection state after failed reconnect attempt.
                 logging.error(f"Reconnect after modify exception failed for {dn}: {reconnect_error}")
         return conn
     result = conn.result or {}
@@ -1781,6 +1816,7 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
             else:
                 logging.error(f"Rebind failed during modify: {_format_ldap_error(conn)}")
         except Exception as e:
+            # Rebind may fail on stale sockets or invalid session state.
             logging.error(f"Rebind failed during modify: {e}")
         if conn_factory:
             logging.warning(f"Reconnecting LDAP after modify bind loss for {dn}")
@@ -1790,6 +1826,7 @@ def _apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -
                 if conn.modify(dn, changes):
                     return conn
             except Exception as e:
+                # If reconnect also fails, caller keeps control of recovery strategy.
                 logging.error(f"Reconnect failed during modify: {e}")
         logging.error(f"Modify failed for {dn}: {_format_ldap_error(conn)}")
         return conn
@@ -1833,6 +1870,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                 attributes=["employeeID", "distinguishedName"],
             )
         except Exception as e:
+            # Duplicate-check failures are non-fatal and result in a safe skip path.
             logging.error(f"Existing-user lookup failed for {employee_id}: {e}")
             return None
         if connection.entries:
@@ -1841,6 +1879,8 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
 
     existing_dn = find_existing_user_dn(conn, emp_id)
     if existing_dn:
+        # Non-obvious side effect: if employeeID already exists, provisioning does
+        # not recreate the user; it only attempts a manager refresh.
         logging.info(f"User already exists: {emp_id} at {existing_dn}")
         # If user exists, update manager if needed
         manager_id = extract_manager_id(user_data)
@@ -1938,6 +1978,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         "userAccountControl",
     }
     def _build_numeric_suffix(index: int) -> str:
+        """Return '' for the first attempt, then 2-based numeric suffixes."""
         return "" if index == 0 else str(index + 1)
 
     def _classify_account_id_conflicts(message: str) -> set[str]:
@@ -1951,11 +1992,23 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         return conflicts
 
     dn = None
+    # Safety cap prevents infinite collision loops on duplicate names/identifiers.
     max_retry_attempts = 50
+    cn_collision_threshold_raw = os.getenv("CN_COLLISION_THRESHOLD", "10")
+    try:
+        cn_collision_threshold = max(1, int(cn_collision_threshold_raw))
+    except ValueError:
+        cn_collision_threshold = 10
+
     retry_count = 0
     cn_index = 0
     sam_index = 0
     alias_index = 0
+    cn_collision_count = 0
+    cn_strategy_switched = False
+    cn_root = full_name
+    emp_token = sanitize_string_for_sam(emp_id)[-4:] or emp_id[-4:]
+
     while retry_count < max_retry_attempts:
         if hasattr(conn, "bound") and not conn.bound:
             try:
@@ -1963,6 +2016,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                     logging.error(f"Bind failed before add attempt: {_format_ldap_error(conn)}")
                     return conn
             except Exception as e:
+                # Abort current user when bind cannot be re-established safely.
                 logging.error(f"Rebind failed before add attempt: {e}")
                 return conn
 
@@ -1970,7 +2024,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         sam_suffix = _build_numeric_suffix(sam_index)
         alias_suffix = _build_numeric_suffix(alias_index)
 
-        cn = full_name if not cn_suffix else f"{full_name} {cn_suffix}"
+        cn = cn_root if not cn_suffix else f"{cn_root} {cn_suffix}"
         sam = build_sam(sam_suffix)
         if not sam:
             logging.warning(f"Skipping user with invalid sAMAccountName: {user_data}")
@@ -1995,6 +2049,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                 dn = dn_candidate
                 break
         except Exception as e:
+            # Transient add exceptions can be retried after connection refresh.
             logging.error(f"Add raised exception for {dn_candidate}: {e}")
             if conn_factory:
                 try:
@@ -2003,16 +2058,37 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                     retry_count += 1
                     continue
                 except Exception as reconnect_error:
+                    # If reconnect fails, stop retries to avoid duplicate side effects.
                     logging.error(f"Reconnect failed after add exception for {dn_candidate}: {reconnect_error}")
             return conn
         result = conn.result or {}
         msg = str(result.get("message") or "")
         if result.get("result") == 68:
+            # entryAlreadyExists here usually indicates DN/CN collision; retry by
+            # incrementing only CN suffix while preserving account identifiers.
+            cn_collision_count += 1
             cn_index += 1
             retry_count += 1
+            if (
+                not cn_strategy_switched
+                and cn_collision_count >= cn_collision_threshold
+                and emp_token
+            ):
+                # Alternate ID strategy: after repeated name collisions, include a
+                # stable employee-derived token in CN to reduce further conflicts.
+                cn_strategy_switched = True
+                cn_root = f"{full_name} {emp_token}"
+                cn_index = 0
+                cn_collision_count = 0
+                logging.warning(
+                    f"Repeated CN collisions for employeeID {emp_id} under '{ldap_create_base}' "
+                    f"(threshold={cn_collision_threshold}). Switching CN base from '{full_name}' "
+                    f"to '{cn_root}'. Action: review existing duplicate-name objects if collisions persist."
+                )
+                continue
             logging.warning(
                 f"Add failed for {dn_candidate} (entryAlreadyExists on DN/CN); "
-                f"retrying with CN suffix {cn_index + 1}"
+                f"retrying with CN suffix {cn_index + 1} (employeeID={emp_id})"
             )
             continue
         if result.get("result") == 19:
@@ -2042,6 +2118,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                             return conn
                         logging.info(f"Post-reconnect state after account-id constraint: {_format_ldap_error(conn)}")
                     except Exception as e:
+                        # Stop collision retries when reconnection itself is unstable.
                         logging.error(f"Reconnect failed after account-id constraint for {dn_candidate}: {e}")
                         return conn
                 if "sam" in conflict_fields:
@@ -2078,6 +2155,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
                         )
                     return conn
                 except Exception as e:
+                    # Connection recovery failed; return control to caller for next user.
                     logging.error(f"Reconnect failed after bind-lost error for {dn_candidate}: {e}")
                     return conn
             logging.error(f"Add failed for {dn_candidate}: bind lost and no conn_factory available")
@@ -2086,8 +2164,10 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         return conn
     if not dn:
         logging.error(
-            f"Add failed for base CN '{full_name}': exceeded unique add retries "
-            f"(cn_index={cn_index}, sam_index={sam_index}, alias_index={alias_index})"
+            f"Add failed for employeeID {emp_id}: exceeded unique add retries "
+            f"(cn_root='{cn_root}', cn_index={cn_index}, sam_index={sam_index}, alias_index={alias_index}, "
+            f"strategy_switched={cn_strategy_switched}). "
+            f"Action: inspect existing AD objects under '{ldap_create_base}' for conflicting CN/UPN/mail values."
         )
         return conn
     logging.info(f"User created: {dn} (hireDate={hire_date})")
@@ -2100,6 +2180,7 @@ def provision_user_in_ad(user_data, conn, ldap_search_base, ldap_create_base, co
         conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [512])]})
         logging.info(f"Account enabled and password set for {dn}")
     except Exception as e:
+        # Password/enable failures are logged; user object may still exist for manual follow-up.
         logging.error(f"Password or enable failed for {dn}: {e}")
     return conn
 
@@ -2124,9 +2205,11 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     logging.info(f"ℹ️  Retrieved {len(employees_with_hire_date)} total ADP employees with hire dates")
     
     hire_lookback_raw = os.getenv("SYNC_HIRE_LOOKBACK_DAYS", "4")
+    # Assumption: lookback filter is date-based in UTC (not hour/minute precise).
     try:
         hire_lookback_days = max(0, int(hire_lookback_raw))
     except ValueError:
+        # Keep scheduler resilient to bad env configuration.
         hire_lookback_days = 4
 
     today = datetime.now(tz=timezone.utc).date()
@@ -2140,6 +2223,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
         try:
             hire_date = datetime.fromisoformat(hire_str).date()
         except Exception:
+            # Skip records with malformed hire dates instead of failing the batch.
             logging.debug(f"Bad hireDate format for {extract_employee_id(emp)}: {hire_str}")
             continue
         if hire_date >= cutoff:
@@ -2195,6 +2279,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
             return connection
         conn = conn_factory()
     except Exception as e:
+        # Provisioning cannot continue without a bound LDAP connection.
         logging.error(f"❌ Failed to connect to LDAP server: {e}")
         return
     logging.info("🔗 LDAP connection opened")
@@ -2213,6 +2298,7 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
                     break
                 conn = new_conn
             except Exception as e:
+                # Continue batch processing when one worker record triggers an unexpected exception.
                 logging.error(f"❌ Exception provisioning {emp_id}: {e}")
     finally:
         _safe_unbind(conn, "scheduled_provision_new_hires completion")
@@ -2223,11 +2309,13 @@ def scheduled_provision_new_hires(mytimer: func.TimerRequest):
 @app.schedule(schedule="0 0 * * * *", arg_name="mytimer", run_on_startup=False)
 def scheduled_update_existing_users(mytimer: func.TimerRequest):
     """Timer-triggered job that updates existing AD users from ADP."""
+    # Assumption: updates are dry-run by default to require explicit opt-in for writes.
     dry_run = _env_truthy("UPDATE_DRY_RUN", True)
     lookback_days_raw = os.getenv("UPDATE_LOOKBACK_DAYS", "7")
     try:
         lookback_days = int(lookback_days_raw)
     except ValueError:
+        # Fall back to default lookback window when env value is invalid.
         lookback_days = 7
     include_missing_updates = _env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True)
     log_no_changes = _env_truthy("UPDATE_LOG_NO_CHANGES", False)
@@ -2253,6 +2341,8 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                 candidates.append(emp)
             elif not updated_at:
                 missing_last_updated += 1
+                # Side effect: when enabled, employees with unknown lastUpdated are
+                # included to avoid missing legitimate changes.
                 if include_missing_updates:
                     candidates.append(emp)
         logging.info(
@@ -2306,6 +2396,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
             return connection
         conn = conn_factory()
     except Exception as e:
+        # Update job cannot proceed without LDAP connectivity.
         logging.error(f"❌ Failed to connect to LDAP server for update: {e}")
         return
 
@@ -2325,12 +2416,14 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                 attributes=AD_UPDATE_SEARCH_ATTRIBUTES,
             )
         except Exception as e:
+            # Recover from transient search errors by refreshing LDAP connection.
             logging.error(f"LDAP search exception for {emp_id}: {e}")
             if conn_factory:
                 try:
                     _safe_unbind(conn, f"update search exception for {emp_id}")
                     conn = conn_factory()
                 except Exception as reconnect_error:
+                    # Keep batch moving even when immediate reconnect fails.
                     logging.error(f"Reconnect failed after search exception for {emp_id}: {reconnect_error}")
             continue
         if not found and _is_bind_lost_result(getattr(conn, "result", None) or {}):
@@ -2340,6 +2433,7 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
                     _safe_unbind(conn, f"update search bind-loss for {emp_id}")
                     conn = conn_factory()
                 except Exception as reconnect_error:
+                    # Stop processing when bind-loss recovery cannot re-establish a session.
                     logging.error(f"Reconnect failed after bind-loss search for {emp_id}: {reconnect_error}")
                     break
             continue
@@ -2394,7 +2488,14 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
 @app.function_name(name="process_request")
 @app.route(route="process", methods=["POST"])
 def process_request(req: func.HttpRequest) -> func.HttpResponse:
-    """HTTP endpoint that returns active users with ADP/HR details."""
+    """
+    HTTP endpoint that returns active users with ADP/HR details.
+
+    Response contract (JSON array): one object per active employee with keys:
+    employeeId, givenName/familyName, legal* names, preferred* names,
+    displayName, jobTitle, company, department, hireDate, terminationDate,
+    and raw workAssignments.
+    """
     token = get_adp_token()
     if not token:
         return func.HttpResponse("Token fail", status_code=500)
@@ -2482,6 +2583,7 @@ def fetch_ad_data_task() -> Optional[dict]:
         ca_bundle = get_ca_bundle()
         logging.info(f"🔐 Using CA bundle for export: {ca_bundle}")
     except Exception as e:
+        # Export endpoint cannot validate TLS without a resolved CA bundle.
         logging.error(f"❌ Unable to determine CA bundle for export: {e}")
         return None
     if not os.path.isfile(ca_bundle):
@@ -2506,6 +2608,7 @@ def fetch_ad_data_task() -> Optional[dict]:
         )
         logging.info(f"🔗 LDAP connection opened for export ({_format_ldap_error(conn)})")
     except Exception as e:
+        # Return a controlled failure when LDAP bind cannot be established.
         logging.error(f"Failed to connect to LDAP: {e}")
         return None
 
@@ -2524,6 +2627,7 @@ def fetch_ad_data_task() -> Optional[dict]:
                     paged_cookie=cookie,
                 )
             except Exception as e:
+                # Abort export cleanly if paged search fails mid-stream.
                 logging.error(f"LDAP export search failed: {e}")
                 return None
             for entry in conn.entries:
@@ -2552,7 +2656,14 @@ def fetch_ad_data_task() -> Optional[dict]:
 @app.function_name(name="export_adp_data")
 @app.route(route="export", methods=["GET"])
 def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """Return both department pairs and diagnostic sets to debug mappings."""
+    """
+    Return department mapping diagnostics used to tune mapping rules.
+
+    Response contract (JSON object):
+    - pairs: unique [adpDept, adDept] tuples
+    - adpDepartments/adDepartments: normalized department inventories
+    - adpOnlyIDs/adOnlyIDs: employeeID set diffs between ADP and AD
+    """
     logging.info("Export triggered: building dept mappings and diagnostics.")
 
     token = get_adp_token()
@@ -2567,6 +2678,7 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
             adp_employees = future_adp.result()
             ldap_map = future_ldap.result()
         except Exception as e:
+            # Surface data-source failures as a single controlled endpoint error.
             logging.error(f"Parallel data fetch failed: {e}")
             return func.HttpResponse("Data fetch execution error.", status_code=500)
 
@@ -2601,6 +2713,7 @@ def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
                 continue
             dept_pairs.add((adp_dept, ad_dept))
         except Exception as e:
+            # Preserve export continuity if an individual worker record is malformed.
             logging.warning(f"Skipping malformed export worker record: {e}")
 
     # Prepare JSON payload
