@@ -4,12 +4,15 @@ This project syncs ADP Workforce Now worker data into on-prem Active Directory o
 
 ## Overview
 
-The application has two timer jobs and two HTTP diagnostics routes:
+The application has two timer jobs and one HTTP diagnostics route:
 
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
 - `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
-- `POST /api/process` returns active ADP worker snapshots.
-- `GET /api/export` returns ADP-vs-AD department and employeeID diagnostics.
+- `GET /api/diagnostics` serves explicit diagnostics views:
+  - `view=summary`
+  - `view=department-diff`
+  - `view=worker&employeeId=...`
+  - `view=recent-hires&limit=25`
 
 ## Architecture
 
@@ -30,7 +33,7 @@ app/
   ldap_client.py            # LDAP connection, diff/modify, guardrails, diagnostics
   provisioning.py           # new-hire create orchestration
   updates.py                # existing-user update orchestration
-  export_routes.py          # HTTP route handlers
+  diagnostics_routes.py     # HTTP diagnostics handler with query-driven views
 function_app.py             # host shim importing app from app.function_app
 ```
 
@@ -127,6 +130,7 @@ Current tests cover:
 - Update guardrails (denylist, dry-run, no-change path).
 - Config/env parsing defaults and invalid fallback behavior.
 - ADP retry behavior for retryable and non-retryable outcomes.
+- Diagnostics route modes for summary, department diff, worker lookup, and recent hires.
 - Provisioning collision fail-fast and deterministic CN behavior.
 - Secret materialization/cleanup behavior for PEM/base64 env values.
 

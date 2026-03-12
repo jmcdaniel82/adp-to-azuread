@@ -13,7 +13,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - `app/function_app.py` (thin trigger/route wiring)
   - `app/config.py`, `app/constants.py`, `app/models.py`
   - `app/security.py`, `app/adp_client.py`, `app/ldap_client.py`
-  - `app/department_resolution.py`, `app/provisioning.py`, `app/updates.py`, `app/export_routes.py`
+  - `app/department_resolution.py`, `app/provisioning.py`, `app/updates.py`, `app/diagnostics_routes.py`
 - Root `function_app.py` is now a host shim that imports `app` from `app.function_app`.
 
 ### Security
@@ -52,6 +52,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Added `local.settings.example.json` as the committed local configuration template while keeping `local.settings.json` out of source control.
 - Added staging smoke-test checklist for timer jobs, HTTP routes, ADP token retrieval, and LDAP bind/rebind validation.
 - Updated repository documentation to reflect the new package layout, Azure Functions v2 root shim, CI gates, and local secret-handling expectations.
+- Consolidated the old `process` and `export` HTTP endpoints into one `GET /api/diagnostics` route with explicit query-driven views.
 
 ### Added
 
@@ -70,6 +71,11 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - `displayName` remains human-friendly while uniqueness is handled by CN/account identifiers.
 - CN collision handling now emits periodic cleanup diagnostics and re-checks existing user by `employeeID`.
 - Production log prefixes switched from emoji markers to ASCII tags (`[INFO]`, `[WARN]`, `[ERROR]`).
+- Diagnostics now use one route with bounded, lower-exposure views:
+  - `summary` for counts only,
+  - `department-diff` for ADP-vs-AD comparisons,
+  - targeted `worker` lookup by `employeeId`,
+  - `recent-hires` with bounded `limit`.
 - Provisioning retry behavior was tightened to avoid single-user retry storms:
   - new `PROVISION_MAX_ADD_RETRIES` env var (default `15`),
   - fail-fast path for `result=68` when no visible DN or identifier conflict is found.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .azure_compat import func
-from .export_routes import export_adp_data_handler, process_request_handler
+from .diagnostics_routes import diagnostics_handler
 from .provisioning import run_scheduled_provision_new_hires
 from .updates import run_scheduled_update_existing_users
 
@@ -22,15 +22,8 @@ def scheduled_update_existing_users(mytimer: func.TimerRequest):
     run_scheduled_update_existing_users(mytimer)
 
 
-@app.function_name(name="process_request")
-@app.route(route="process", methods=["POST"])
-def process_request(req: func.HttpRequest) -> func.HttpResponse:
-    """Expose worker payload diagnostics endpoint."""
-    return process_request_handler(req)
-
-
-@app.function_name(name="export_adp_data")
-@app.route(route="export", methods=["GET"])
-def export_adp_data(req: func.HttpRequest) -> func.HttpResponse:
-    """Expose ADP-vs-AD mapping diagnostics endpoint."""
-    return export_adp_data_handler(req)
+@app.function_name(name="diagnostics")
+@app.route(route="diagnostics", methods=["GET"])
+def diagnostics(req: func.HttpRequest) -> func.HttpResponse:
+    """Expose diagnostics views for summary, diff, worker, and recent-hire lookups."""
+    return diagnostics_handler(req)

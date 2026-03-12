@@ -10,5 +10,4 @@ def test_root_entrypoint_exports_function_app_object():
 def test_package_entrypoint_exposes_expected_handlers():
     assert callable(package_entrypoint.scheduled_provision_new_hires)
     assert callable(package_entrypoint.scheduled_update_existing_users)
-    assert callable(package_entrypoint.process_request)
-    assert callable(package_entrypoint.export_adp_data)
+    assert callable(package_entrypoint.diagnostics)

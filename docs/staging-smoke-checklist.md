@@ -16,7 +16,7 @@ Use this checklist after deployment to a staging Function App with staging ADP a
 ## 1. ADP Token Retrieval
 
 - Start the Functions host or tail Function App logs.
-- Trigger `POST /api/process`.
+- Trigger `GET /api/diagnostics?view=summary`.
 - Expect:
   - successful ADP token acquisition,
   - no TLS/certificate errors,
@@ -51,8 +51,9 @@ Use this checklist after deployment to a staging Function App with staging ADP a
 ## 4. HTTP Route Smoke
 
 - Call:
-  - `POST /api/process`
-  - or `GET /api/export`
+  - `GET /api/diagnostics?view=summary`
+  - `GET /api/diagnostics?view=department-diff`
+  - `GET /api/diagnostics?view=worker&employeeId=<known employeeID>`
 - Expect:
   - HTTP 200
   - valid JSON payload
