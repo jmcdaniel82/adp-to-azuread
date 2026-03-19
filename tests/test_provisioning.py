@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import app.provisioning as provisioning
+from app.constants import ATTR_MAIL, ATTR_SAM_ACCOUNT_NAME, ATTR_USER_PRINCIPAL_NAME
 from app.provisioning import provision_user_in_ad
 
 
@@ -41,6 +43,23 @@ class DummyConnResult68(DummyConn):
         self.add_attributes = attributes
         self.result = {"result": 68, "description": "entryAlreadyExists"}
         return False
+
+
+class DummyConnRetryOnce(DummyConn):
+    def __init__(self):
+        super().__init__()
+        self.add_attempts = []
+
+    def add(self, dn, attributes=None):
+        self.add_calls += 1
+        self.add_called = dn
+        self.add_attributes = attributes
+        self.add_attempts.append((dn, dict(attributes or {})))
+        if self.add_calls == 1:
+            self.result = {"result": 68, "description": "entryAlreadyExists"}
+            return False
+        self.result = {"result": 0}
+        return True
 
 
 def _make_emp(employee_id="EMP12345", first="Jane", last="Doe"):
@@ -90,3 +109,54 @@ def test_result68_without_visible_conflicts_fails_fast_and_counts_failure():
     )
     assert conn.add_calls == 1
     assert summary["add_failures"] == 1
+
+
+def test_first_sam_conflict_retry_uses_suffix_1(monkeypatch):
+    conn = DummyConnRetryOnce()
+    emp = _make_emp(employee_id="EMPCLASH1", first="Jane", last="Doe")
+    monkeypatch.setattr(provisioning, "dn_exists_in_create_scope", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        provisioning,
+        "collect_identifier_conflicts",
+        lambda *args, **kwargs: {"sam": ["existing sam"], "upn": [], "mail": []},
+    )
+
+    provision_user_in_ad(
+        emp,
+        conn,
+        "DC=example,DC=com",
+        "OU=Users,DC=example,DC=com",
+        max_retry_attempts=5,
+        cn_collision_threshold=2,
+    )
+
+    assert conn.add_calls == 2
+    assert conn.add_attempts[0][1][ATTR_SAM_ACCOUNT_NAME] == "jdoe"
+    assert conn.add_attempts[1][1][ATTR_SAM_ACCOUNT_NAME] == "jdoe1"
+
+
+def test_first_alias_conflict_retry_uses_suffix_1(monkeypatch):
+    conn = DummyConnRetryOnce()
+    emp = _make_emp(employee_id="EMPCLASH2", first="Jane", last="Doe")
+    monkeypatch.setattr(provisioning, "dn_exists_in_create_scope", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        provisioning,
+        "collect_identifier_conflicts",
+        lambda *args, **kwargs: {"sam": [], "upn": ["existing upn"], "mail": []},
+    )
+    monkeypatch.setenv("UPN_SUFFIX", "example.com")
+
+    provision_user_in_ad(
+        emp,
+        conn,
+        "DC=example,DC=com",
+        "OU=Users,DC=example,DC=com",
+        max_retry_attempts=5,
+        cn_collision_threshold=2,
+    )
+
+    assert conn.add_calls == 2
+    assert conn.add_attempts[0][1][ATTR_USER_PRINCIPAL_NAME] == "janedoe@example.com"
+    assert conn.add_attempts[0][1][ATTR_MAIL] == "janedoe@cfsbrands.com"
+    assert conn.add_attempts[1][1][ATTR_USER_PRINCIPAL_NAME] == "janedoe1@example.com"
+    assert conn.add_attempts[1][1][ATTR_MAIL] == "janedoe1@cfsbrands.com"

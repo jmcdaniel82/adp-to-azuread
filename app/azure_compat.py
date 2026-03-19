@@ -6,8 +6,10 @@ runtime behavior unchanged in Azure.
 
 from __future__ import annotations
 
+from typing import Any
+
 try:
-    import azure.functions as func  # type: ignore
+    import azure.functions as _func
 except ModuleNotFoundError:
 
     class _DummyDecoratorApp:
@@ -41,4 +43,6 @@ except ModuleNotFoundError:
         HttpResponse = _DummyHttpResponse
         TimerRequest = object
 
-    func = _DummyModule()
+    func: Any = _DummyModule()
+else:
+    func = _func

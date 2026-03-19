@@ -9,7 +9,10 @@ def make_request(params=None, url="https://example.test/api/diagnostics"):
 
 
 def response_json(response):
-    body = response.body
+    if hasattr(response, "get_body"):
+        body = response.get_body()
+    else:
+        body = response.body
     if isinstance(body, bytes):
         body = body.decode("utf-8")
     return json.loads(body)

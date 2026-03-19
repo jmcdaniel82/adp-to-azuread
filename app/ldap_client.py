@@ -37,6 +37,8 @@ from .constants import (
 from .department_resolution import normalize_department_name, resolve_local_ac_department
 from .reporting import inc_stat
 
+ACCOUNTDISABLE_FLAG = 0x0002
+
 
 def log_ldap_target_details(context: str, host: str, ca_bundle: str, port: int = 636) -> None:
     """Log LDAP target host and DNS resolution details for troubleshooting."""
@@ -227,14 +229,14 @@ def get_department_by_dn(conn, dn: str) -> str:
     return ""
 
 
-def build_update_attributes(
+def plan_update_attributes(
     emp: dict,
     conn,
     ldap_search_base: str,
     current_ad_department: str = "",
     manager_department: str = "",
-) -> dict:
-    """Map ADP worker payload into AD attributes for update flow."""
+) -> tuple[dict, dict, Optional[str], str]:
+    """Return exact desired update attrs plus department-planning context."""
     emp_id = extract_employee_id(emp)
     country_attrs = build_ad_country_attributes(extract_work_address_field(emp, "countryCode"))
 
@@ -287,12 +289,40 @@ def build_update_attributes(
             resolution.get("confidence") or "<none>",
             resolution.get("blockReason") or "<none>",
         )
+    return desired, resolution, manager_dn, resolved_manager_department
+
+
+def build_update_attributes(
+    emp: dict,
+    conn,
+    ldap_search_base: str,
+    current_ad_department: str = "",
+    manager_department: str = "",
+) -> dict:
+    """Map ADP worker payload into AD attributes for update flow."""
+    desired, _resolution, _manager_dn, _resolved_manager_department = plan_update_attributes(
+        emp,
+        conn,
+        ldap_search_base,
+        current_ad_department=current_ad_department,
+        manager_department=manager_department,
+    )
     return desired
 
 
 def normalize_department_for_compare(value: str) -> str:
     """Normalize department values only for diff comparisons."""
     return normalize_department_name(value)
+
+
+def _parse_int_like(value) -> Optional[int]:
+    """Return int value when the payload is numeric-like, else None."""
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
@@ -318,10 +348,26 @@ def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
                 desired_cmp = normalize_department_for_compare(desired_str)
                 if current_cmp.lower() == desired_cmp.lower():
                     continue
+            elif attr == "userAccountControl":
+                current_int = _parse_int_like(current)
+                desired_int = _parse_int_like(desired_val)
+                if current_int is not None and desired_int is not None:
+                    if desired_int == 514 and (current_int & ACCOUNTDISABLE_FLAG):
+                        continue
+                    if current_int == desired_int:
+                        continue
             elif current_str == desired_str:
                 continue
         else:
-            if current == desired_val:
+            if attr == "userAccountControl":
+                current_int = _parse_int_like(current)
+                desired_int = _parse_int_like(desired_val)
+                if current_int is not None and desired_int is not None:
+                    if desired_int == 514 and (current_int & ACCOUNTDISABLE_FLAG):
+                        continue
+                    if current_int == desired_int:
+                        continue
+            elif current == desired_val:
                 continue
         changes[attr] = [(MODIFY_REPLACE, [desired_val])]
     return filter_blocked_update_changes(changes, context or "<unknown>")

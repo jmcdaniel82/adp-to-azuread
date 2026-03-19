@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from ldap3 import SUBTREE
 
@@ -12,6 +13,7 @@ from .adp_client import (
     dedupe_workers_by_employee_id,
     extract_employee_id,
     extract_last_updated,
+    extract_work_address_field,
     get_adp_employees,
     get_adp_token,
     is_terminated_employee,
@@ -33,6 +35,55 @@ from .ldap_client import (
 )
 
 
+def select_update_candidates(
+    all_employees: list[dict],
+    settings,
+    *,
+    context: str,
+    now: datetime | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    """Apply the exact scheduled-update candidate filters used by the job."""
+    employees = dedupe_workers_by_employee_id(all_employees, context)
+    log_potential_duplicate_profiles(employees, context)
+
+    candidates: list[dict] = []
+    missing_last_updated = 0
+    selected_missing_last_updated = 0
+    cutoff_iso = ""
+    current_time = now or datetime.now(timezone.utc)
+    if settings.lookback_days > 0:
+        cutoff = current_time - timedelta(days=settings.lookback_days)
+        cutoff_iso = cutoff.date().isoformat()
+        for emp in employees:
+            updated_at = extract_last_updated(emp)
+            if updated_at and updated_at >= cutoff:
+                candidates.append(emp)
+            elif not updated_at:
+                missing_last_updated += 1
+                if settings.include_missing_last_updated:
+                    selected_missing_last_updated += 1
+                    candidates.append(emp)
+    else:
+        candidates = list(employees)
+
+    country_filtered_candidates = []
+    skipped_country = 0
+    for emp in candidates:
+        country_alpha2 = (extract_work_address_field(emp, "countryCode") or "").strip().upper()
+        if country_alpha2 in {"US", "CA"}:
+            country_filtered_candidates.append(emp)
+        else:
+            skipped_country += 1
+
+    return country_filtered_candidates, {
+        "deduped_count": len(employees),
+        "missing_last_updated": missing_last_updated,
+        "selected_missing_last_updated": selected_missing_last_updated,
+        "skipped_country": skipped_country,
+        "cutoff_iso": cutoff_iso,
+    }
+
+
 def run_scheduled_update_existing_users(mytimer) -> None:
     """Timer-trigger orchestration for scheduled_update_existing_users."""
     settings = get_update_job_settings()
@@ -50,28 +101,27 @@ def run_scheduled_update_existing_users(mytimer) -> None:
     if all_employees is None:
         logging.error("[ERROR] get_adp_employees returned None for update")
         return
-    all_employees = dedupe_workers_by_employee_id(all_employees, "scheduled_update_existing_users")
-    log_potential_duplicate_profiles(all_employees, "scheduled_update_existing_users")
+    candidates, candidate_stats = select_update_candidates(
+        all_employees,
+        settings,
+        context="scheduled_update_existing_users",
+    )
 
-    candidates = []
-    missing_last_updated = 0
     if settings.lookback_days > 0:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=settings.lookback_days)
-        for emp in all_employees:
-            updated_at = extract_last_updated(emp)
-            if updated_at and updated_at >= cutoff:
-                candidates.append(emp)
-            elif not updated_at:
-                missing_last_updated += 1
-                if settings.include_missing_last_updated:
-                    candidates.append(emp)
         logging.info(
-            f"[INFO] {len(candidates)} ADP employees considered for update since {cutoff.date().isoformat()} "
-            f"(missing lastUpdated={missing_last_updated})"
+            f"[INFO] {len(candidates)} ADP employees considered for update since "
+            f"{candidate_stats['cutoff_iso']} "
+            f"(missing lastUpdated={candidate_stats['missing_last_updated']})"
         )
     else:
-        candidates = all_employees
         logging.info(f"[INFO] {len(candidates)} ADP employees considered for update (no lookback filter)")
+
+    if candidate_stats["skipped_country"]:
+        logging.info(
+            f"[INFO] Skipping {candidate_stats['skipped_country']} ADP employees "
+            f"for update due to unsupported country "
+            f"(allowed=US,CA)"
+        )
 
     if not candidates:
         logging.info("[INFO] Nothing to update; exiting scheduled_update_existing_users")

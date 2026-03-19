@@ -4,10 +4,11 @@ This project syncs ADP Workforce Now worker data into on-prem Active Directory o
 
 ## Overview
 
-The application has two timer jobs and one HTTP diagnostics route:
+The application has three timer jobs and one HTTP diagnostics route:
 
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
 - `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
+- `scheduled_last_30_day_termed_report` emails a weekly ADP-only CSV of workers terminated in the last 30 days.
 - `GET /api/diagnostics` serves explicit diagnostics views:
   - `view=summary`
   - `view=department-diff`
@@ -101,6 +102,16 @@ Set values in Azure App Settings for deployed environments. For local developmen
 - `UPDATE_LOOKBACK_DAYS` (default `7`)
 - `UPDATE_INCLUDE_MISSING_LAST_UPDATED` (default `true`)
 - `UPDATE_LOG_NO_CHANGES` (default `false`)
+
+### Weekly Termed Report
+
+- `TERMED_REPORT_SCHEDULE` (default `0 0 14 * * 1`, weekly Monday trigger; override as needed)
+- `TERMED_REPORT_LOOKBACK_DAYS` (default `30`)
+- `TERMED_REPORT_SMTP_HOST` (default `10.209.10.25`)
+- `TERMED_REPORT_SMTP_PORT` (default `25`)
+- `TERMED_REPORT_FROM_ADDRESS` (default `90day@cfsbrands.com`)
+- `TERMED_REPORT_RECIPIENTS` (default `jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com`)
+- `TERMED_REPORT_SUBJECT` (default `ADP Last 30 Day Termed Report`)
 
 ## Local Run
 

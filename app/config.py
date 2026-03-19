@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
-from .models import AdpSettings, LdapSettings, ProvisionJobSettings, UpdateJobSettings
+from .models import AdpSettings, LdapSettings, ProvisionJobSettings, TermedReportSettings, UpdateJobSettings
 from .security import get_ca_bundle
 
 
@@ -27,6 +27,12 @@ def parse_int_env(name: str, default: int, minimum: int | None = None) -> int:
     if minimum is not None and parsed < minimum:
         return minimum
     return parsed
+
+
+def parse_csv_env(name: str, default: str = "") -> tuple[str, ...]:
+    """Parse a comma-delimited environment variable into trimmed values."""
+    raw = os.getenv(name, default)
+    return tuple(part.strip() for part in str(raw).split(",") if part.strip())
 
 
 def missing_env_vars(names: Iterable[str]) -> list[str]:
@@ -96,4 +102,19 @@ def get_provision_job_settings() -> ProvisionJobSettings:
         hire_lookback_days=parse_int_env("SYNC_HIRE_LOOKBACK_DAYS", 4),
         max_add_retries=parse_int_env("PROVISION_MAX_ADD_RETRIES", 15, minimum=1),
         cn_collision_threshold=parse_int_env("CN_COLLISION_THRESHOLD", 5, minimum=1),
+    )
+
+
+def get_termed_report_settings() -> TermedReportSettings:
+    """Return typed weekly termed-report settings with production defaults."""
+    return TermedReportSettings(
+        lookback_days=parse_int_env("TERMED_REPORT_LOOKBACK_DAYS", 30, minimum=1),
+        smtp_host=os.getenv("TERMED_REPORT_SMTP_HOST", "10.209.10.25").strip(),
+        smtp_port=parse_int_env("TERMED_REPORT_SMTP_PORT", 25, minimum=1),
+        from_address=os.getenv("TERMED_REPORT_FROM_ADDRESS", "90day@cfsbrands.com").strip(),
+        recipients=parse_csv_env(
+            "TERMED_REPORT_RECIPIENTS",
+            "jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com",
+        ),
+        subject=os.getenv("TERMED_REPORT_SUBJECT", "ADP Last 30 Day Termed Report").strip(),
     )

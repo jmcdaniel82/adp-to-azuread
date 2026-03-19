@@ -1,7 +1,9 @@
+from datetime import datetime, timedelta, timezone
+
 from app.constants import ATTR_MAIL, ATTR_USER_PRINCIPAL_NAME
 from app.ldap_client import diff_update_attributes
 from app.models import LdapSettings, UpdateJobSettings
-from app.updates import run_scheduled_update_existing_users
+from app.updates import run_scheduled_update_existing_users, select_update_candidates
 
 
 class _DummyAttr:
@@ -24,8 +26,10 @@ class _DummyConn:
         self.entries = entries
         self.result = {}
         self.modify_calls = []
+        self.search_calls = []
 
     def search(self, *args, **kwargs):
+        self.search_calls.append((args, kwargs))
         return True
 
     def modify(self, dn, changes):
@@ -47,6 +51,61 @@ def test_email_routing_denylist_is_never_included_in_update_mods():
     assert ATTR_MAIL not in changes
     assert ATTR_USER_PRINCIPAL_NAME not in changes
     assert "title" in changes
+
+
+def test_user_account_control_disable_is_skipped_when_account_already_disabled():
+    entry = _DummyEntry({"userAccountControl": "514"})
+    changes = diff_update_attributes(entry, {"userAccountControl": 514}, context="EMP-UAC")
+    assert changes == {}
+
+
+def test_user_account_control_disable_is_skipped_when_disabled_bit_already_set():
+    entry = _DummyEntry({"userAccountControl": "66050"})
+    changes = diff_update_attributes(entry, {"userAccountControl": 514}, context="EMP-UAC-BIT")
+    assert changes == {}
+
+
+def test_select_update_candidates_matches_job_filters():
+    now = datetime(2026, 3, 16, tzinfo=timezone.utc)
+    settings = UpdateJobSettings(
+        dry_run=True,
+        lookback_days=7,
+        include_missing_last_updated=True,
+        log_no_changes=False,
+    )
+
+    def employee(employee_id, country_code, updated_at=None):
+        payload = {
+            "workerID": {"idValue": employee_id},
+            "workAssignments": [
+                {
+                    "assignedWorkLocations": [{"address": {"countryCode": country_code}}],
+                }
+            ],
+            "workerDates": {"hireDate": "2025-03-01"},
+        }
+        if updated_at is not None:
+            payload["meta"] = {"lastUpdatedDateTime": updated_at.isoformat()}
+        return payload
+
+    candidates, stats = select_update_candidates(
+        [
+            employee("EMPUS", "US", now - timedelta(days=1)),
+            employee("EMPCA", "CA"),
+            employee("EMPMX", "MX", now - timedelta(days=1)),
+            employee("EMPOLD", "US", now - timedelta(days=10)),
+            employee("EMPDUP", "US", now - timedelta(days=10)),
+            employee("EMPDUP", "US", now - timedelta(days=1)),
+        ],
+        settings,
+        context="test_select_update_candidates",
+        now=now,
+    )
+
+    assert [candidate["workerID"]["idValue"] for candidate in candidates] == ["EMPUS", "EMPCA", "EMPDUP"]
+    assert stats["missing_last_updated"] == 1
+    assert stats["selected_missing_last_updated"] == 1
+    assert stats["skipped_country"] == 1
 
 
 def test_scheduled_update_dry_run_does_not_apply_modifications(monkeypatch, tmp_path):
@@ -75,7 +134,7 @@ def test_scheduled_update_dry_run_does_not_apply_modifications(monkeypatch, tmp_
         lambda token: [
             {
                 "workerID": {"idValue": "EMP1"},
-                "workAssignments": [{}],
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
                 "workerDates": {"hireDate": "2026-03-01"},
             }
         ],
@@ -125,7 +184,7 @@ def test_scheduled_update_no_change_path_logs_when_enabled(monkeypatch, caplog, 
         lambda token: [
             {
                 "workerID": {"idValue": "EMP1"},
-                "workAssignments": [{}],
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
                 "workerDates": {"hireDate": "2026-03-01"},
             }
         ],
@@ -145,3 +204,77 @@ def test_scheduled_update_no_change_path_logs_when_enabled(monkeypatch, caplog, 
     with caplog.at_level("INFO"):
         run_scheduled_update_existing_users(None)
     assert "No updates needed for EMP1 at CN=User,DC=x" in caplog.text
+
+
+def test_scheduled_update_only_targets_us_and_ca_users(monkeypatch, tmp_path):
+    conn = _DummyConn(
+        [_DummyEntry({"distinguishedName": "CN=User,DC=x", "department": "Finance", "manager": ""})]
+    )
+    ldap_settings = LdapSettings(
+        server="ldap.example.com",
+        user="EXAMPLE\\svc",
+        password="pw",
+        search_base="DC=example,DC=com",
+        create_base=None,
+        ca_bundle_path=str(tmp_path / "ca.pem"),
+    )
+    (tmp_path / "ca.pem").write_text("dummy", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=True, lookback_days=0, include_missing_last_updated=True, log_no_changes=False
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")
+    monkeypatch.setattr(
+        "app.updates.get_adp_employees",
+        lambda token: [
+            {
+                "workerID": {"idValue": "EMPUS"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            },
+            {
+                "workerID": {"idValue": "EMPCA"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "CA"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            },
+            {
+                "workerID": {"idValue": "EMPMX"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "MX"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            },
+            {
+                "workerID": {"idValue": "EMPUNKNOWN"},
+                "workAssignments": [{}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            },
+        ],
+    )
+    monkeypatch.setattr("app.updates.validate_ldap_settings", lambda require_create_base=False: [])
+    monkeypatch.setattr("app.updates.get_ldap_settings", lambda require_create_base=False: ldap_settings)
+    monkeypatch.setattr("app.updates.create_ldap_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr("app.updates.make_conn_factory", lambda *args, **kwargs: lambda: conn)
+    monkeypatch.setattr("app.updates.is_terminated_employee", lambda emp: False)
+    monkeypatch.setattr(
+        "app.updates.build_update_attributes",
+        lambda *args, **kwargs: {"title": "Same Title"},
+    )
+    monkeypatch.setattr("app.updates.diff_update_attributes", lambda *args, **kwargs: {})
+    monkeypatch.setattr("app.updates.entry_attr_value", lambda entry, attr: "CN=User,DC=x")
+    monkeypatch.setattr("app.updates.safe_unbind", lambda conn, context: None)
+
+    run_scheduled_update_existing_users(None)
+
+    search_filters = [
+        kwargs.get("search_filter") or args[1]
+        for args, kwargs in conn.search_calls
+        if kwargs.get("search_filter") or len(args) > 1
+    ]
+    employee_search_filters = [
+        search_filter
+        for search_filter in search_filters
+        if search_filter.startswith("(employeeID=")
+    ]
+    assert employee_search_filters == ["(employeeID=EMPUS)", "(employeeID=EMPCA)"]

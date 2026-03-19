@@ -17,6 +17,13 @@
     "LDAP_CREATE_BASE": "OU=Users,DC=example,DC=com",
     "CA_BUNDLE_PATH": "C:\\cert\\corp-ca-bundle.pem",
     "UPDATE_DRY_RUN": "true",
+    "TERMED_REPORT_SCHEDULE": "0 0 14 * * 1",
+    "TERMED_REPORT_LOOKBACK_DAYS": "30",
+    "TERMED_REPORT_SMTP_HOST": "10.209.10.25",
+    "TERMED_REPORT_SMTP_PORT": "25",
+    "TERMED_REPORT_FROM_ADDRESS": "90day@cfsbrands.com",
+    "TERMED_REPORT_RECIPIENTS": "jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com",
+    "TERMED_REPORT_SUBJECT": "ADP Last 30 Day Termed Report",
     "PYTHON_ENABLE_DEBUGPY": "1"
   }
 }

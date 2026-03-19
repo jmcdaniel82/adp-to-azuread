@@ -231,7 +231,7 @@ def provision_user_in_ad(
     }
 
     def numeric_suffix(index: int) -> str:
-        return "" if index == 0 else str(index + 1)
+        return "" if index == 0 else str(index)
 
     def classify_account_id_conflicts(message: str) -> set[str]:
         lowered = (message or "").lower()
@@ -358,7 +358,7 @@ def provision_user_in_ad(
                     cn_diagnostics_logged = True
                 logging.warning(
                     f"Add failed for {dn_candidate} (result=68 with visible DN conflict); "
-                    f"retrying with CN suffix {cn_index + 1} (employeeID={emp_id})"
+                    f"retrying with CN suffix {numeric_suffix(cn_index)} (employeeID={emp_id})"
                 )
                 continue
             if has_identifier_conflicts:

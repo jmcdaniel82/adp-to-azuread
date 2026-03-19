@@ -44,6 +44,8 @@ AD_UPDATE_SEARCH_ATTRIBUTES = [
     "postalCode",
     "streetAddress",
     "co",
+    "c",
+    "countryCode",
     "manager",
     "userAccountControl",
 ]

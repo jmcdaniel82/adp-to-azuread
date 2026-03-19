@@ -64,3 +64,15 @@ class ProvisionJobSettings:
     hire_lookback_days: int
     max_add_retries: int
     cn_collision_threshold: int
+
+
+@dataclass(frozen=True)
+class TermedReportSettings:
+    """Typed weekly termed-report options."""
+
+    lookback_days: int
+    smtp_host: str
+    smtp_port: int
+    from_address: str
+    recipients: tuple[str, ...]
+    subject: str
