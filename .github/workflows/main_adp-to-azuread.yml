@@ -111,4 +111,5 @@ jobs:
           app-name: 'adp-to-azuread'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          remote-build: true
           
