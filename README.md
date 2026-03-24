@@ -17,28 +17,47 @@ The application has three timer jobs and one HTTP diagnostics route:
 
 ## Architecture
 
-The previous monolithic `function_app.py` has been split into a package-first structure:
+The runtime is now organized around thin Azure entrypoints, focused integration packages, and explicit service/gateway orchestration:
 
 ```text
 app/
-  __init__.py
-  function_app.py           # thin Azure trigger/route wiring only
-  azure_compat.py           # local/test import shim when azure-functions is unavailable
-  constants.py              # LDAP attributes, deny lists, defaults
-  config.py                 # typed env parsing and defaults
-  models.py                 # TypedDict/dataclass models
-  reporting.py              # shared stats helpers
-  security.py               # cert/key materialization + deterministic temp cleanup
-  adp_client.py             # ADP auth, retries, pagination, worker parsing
-  department_resolution.py  # Department Resolution V2 engine
-  ldap_client.py            # LDAP connection, diff/modify, guardrails, diagnostics
-  provisioning.py           # new-hire create orchestration
-  updates.py                # existing-user update orchestration
-  diagnostics_routes.py     # HTTP diagnostics handler with query-driven views
+  function_app.py             # thin Azure trigger/route wiring only
+  config.py                   # typed env parsing and defaults
+  constants.py                # LDAP attributes, deny lists, defaults
+  models.py                   # dataclass and TypedDict models
+  reporting.py                # shared stats helpers
+  security.py                 # cert/key materialization + deterministic temp cleanup
+  adp/
+    api.py                    # ADP auth, mTLS, retries, pagination
+    workers.py                # worker parsing and normalization
+    dedupe.py                 # duplicate-profile diagnostics and employeeID dedupe
+  ldap/
+    connection.py             # LDAP TLS/server/bind lifecycle
+    directory.py              # lookup helpers and collision inspection
+    updates.py                # update planning, diffing, guardrails, modify recovery
+  department/
+    resolver.py               # Department Resolution V2 implementation
+  services/
+    interfaces.py             # worker/directory/mail gateway contracts
+    defaults.py               # default ADP, LDAP, SMTP adapters
+    provisioning_service.py   # provisioning orchestration
+    update_service.py         # update orchestration
+    termed_report_service.py  # termed report orchestration
+    diagnostics_service.py    # diagnostics projections and parallel source loading
+  provisioning.py             # thin builder + compatibility wrapper
+  provisioning_ops.py         # account creation and collision workflow
+  updates.py                  # thin builder + candidate selection
+  termination_report.py       # thin builder + report row/render/email helpers
+  diagnostics_routes.py       # HTTP diagnostics controller
+  adp_client.py               # compatibility facade for app.adp
+  ldap_client.py              # compatibility facade for app.ldap
+  department_resolution.py    # compatibility facade for app.department
 function_app.py             # host shim importing app from app.function_app
 ```
 
 Azure Functions Python v2 discovery still happens from the repository root through `function_app.py`, while the decorated handlers and service orchestration live under `app/`.
+
+For the full architecture walkthrough and runtime sequence diagrams, see [docs/architecture.md](docs/architecture.md).
 
 ## Behavioral Invariants Preserved
 
@@ -46,6 +65,8 @@ The refactor intentionally preserves these rules:
 
 - `scheduled_provision_new_hires` remains functional.
 - `scheduled_update_existing_users` remains dry-run by default (`UPDATE_DRY_RUN=true`).
+- Provisioning no longer runs on cold start; the timer uses its normal 15-minute cadence only.
+- Fatal timer-path failures raise exceptions so Azure Functions can treat the invocation as failed.
 - Update sync never modifies create-time-only email routing identifiers:
   - `mail`, `userPrincipalName`, `mailNickname`, `proxyAddresses`, `targetAddress`, and related aliases.
 - Department Resolution V2 remains intact:
@@ -135,7 +156,7 @@ ruff check app tests function_app.py
 mypy app
 ```
 
-Current tests cover:
+Default local verification covers:
 
 - Department Resolution V2 high-risk rules.
 - Update guardrails (denylist, dry-run, no-change path).
@@ -144,6 +165,14 @@ Current tests cover:
 - Diagnostics route modes for summary, department diff, worker lookup, and recent hires.
 - Provisioning collision fail-fast and deterministic CN behavior.
 - Secret materialization/cleanup behavior for PEM/base64 env values.
+
+There is also an opt-in live integration smoke layer:
+
+```powershell
+pytest -q tests/integration
+```
+
+The live suite skips by default unless the required environment variables are present. It covers ADP, LDAP, SMTP, and hosted diagnostics smoke paths. See [docs/integration-tests.md](docs/integration-tests.md).
 
 Staging validation steps are documented in [docs/staging-smoke-checklist.md](docs/staging-smoke-checklist.md).
 
@@ -154,7 +183,14 @@ Repository verification runs in:
 - `.github/workflows/verify.yml`
 - `.github/workflows/main_adp-to-azuread.yml`
 
-The deployment workflow targets the Azure Function App `adp-to-azuread` after verification passes.
+The deployment workflow now builds a curated `release.zip` containing only the runtime payload:
+
+- `function_app.py`
+- `host.json`
+- `requirements.txt`
+- `app/**`
+
+That package is deployed to the Azure Function App `adp-to-azuread` after verification passes.
 
 Manual publish remains:
 

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import app.provisioning as provisioning
 from app.constants import ATTR_MAIL, ATTR_SAM_ACCOUNT_NAME, ATTR_USER_PRINCIPAL_NAME
 from app.provisioning import provision_user_in_ad
@@ -160,3 +162,15 @@ def test_first_alias_conflict_retry_uses_suffix_1(monkeypatch):
     assert conn.add_attempts[0][1][ATTR_MAIL] == "janedoe@cfsbrands.com"
     assert conn.add_attempts[1][1][ATTR_USER_PRINCIPAL_NAME] == "janedoe1@example.com"
     assert conn.add_attempts[1][1][ATTR_MAIL] == "janedoe1@cfsbrands.com"
+
+
+def test_scheduled_provision_raises_when_token_missing(monkeypatch):
+    monkeypatch.setattr(
+        provisioning,
+        "get_provision_job_settings",
+        lambda: SimpleNamespace(hire_lookback_days=4, max_add_retries=15, cn_collision_threshold=5),
+    )
+    monkeypatch.setattr(provisioning, "get_adp_token", lambda: None)
+
+    with pytest.raises(RuntimeError, match="ADP token"):
+        provisioning.run_scheduled_provision_new_hires(None)

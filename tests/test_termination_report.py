@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app import termination_report
 from app.models import TermedReportSettings
 
@@ -161,3 +163,41 @@ def test_run_scheduled_last_30_day_termed_report_emails_csv(monkeypatch):
     assert sent["report_date"] == now
     assert sent["csv_content"] == "employeeID\r\nRECENT1\r\n"
     assert sent["row_count"] == 1
+
+
+def test_run_scheduled_last_30_day_termed_report_raises_when_email_fails(monkeypatch):
+    settings = _settings()
+    employees = [_make_employee("RECENT1", termination_date="2026-03-10T00:00:00Z")]
+
+    monkeypatch.setattr("app.termination_report.get_termed_report_settings", lambda: settings)
+    monkeypatch.setattr("app.termination_report.get_adp_token", lambda: "token")
+    monkeypatch.setattr("app.termination_report.get_adp_employees", lambda token: employees)
+    monkeypatch.setattr(
+        "app.termination_report.select_recent_terminated_employees",
+        lambda all_employees, current_settings, **kwargs: (
+            employees,
+            {
+                "cutoff_iso": "2026-02-14",
+                "deduped_count": 1,
+                "missing_termination_date": 0,
+                "invalid_termination_date": 0,
+                "outside_window": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.termination_report.build_termed_report_rows",
+        lambda current_employees: [{"employeeID": "RECENT1"}],
+    )
+    monkeypatch.setattr(
+        "app.termination_report.render_termed_report_csv",
+        lambda rows: "employeeID\r\nRECENT1\r\n",
+    )
+
+    def _raise_email_failure(current_settings, **kwargs):
+        raise OSError("smtp down")
+
+    monkeypatch.setattr("app.termination_report.send_termed_report_email", _raise_email_failure)
+
+    with pytest.raises(RuntimeError, match="email"):
+        termination_report.run_scheduled_last_30_day_termed_report(None)

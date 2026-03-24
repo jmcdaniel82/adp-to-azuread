@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -31,6 +30,8 @@ from .adp_client import (
     parse_datetime,
 )
 from .config import get_termed_report_settings
+from .services.defaults import DefaultMailGateway, DefaultWorkerProvider
+from .services.termed_report_service import TermedReportOrchestrator
 
 TERMED_REPORT_FIELDNAMES = [
     "employeeID",
@@ -168,15 +169,10 @@ def send_termed_report_email(
     """Send the weekly termed report email with CSV attachment."""
     recipients = list(settings.recipients)
     if not settings.smtp_host or not settings.from_address or not recipients:
-        raise RuntimeError(
-            "Missing SMTP host, from address, or recipients for termed report email."
-        )
+        raise RuntimeError("Missing SMTP host, from address, or recipients for termed report email.")
 
     report_stamp = report_date.date().isoformat()
-    attachment_name = (
-        f"adp_last_{settings.lookback_days}_day_termed_report_"
-        f"{report_date:%Y%m%d}.csv"
-    )
+    attachment_name = f"adp_last_{settings.lookback_days}_day_termed_report_{report_date:%Y%m%d}.csv"
     message = EmailMessage()
     message["From"] = settings.from_address
     message["To"] = ", ".join(recipients)
@@ -203,49 +199,32 @@ def send_termed_report_email(
 
 def run_scheduled_last_30_day_termed_report(mytimer) -> None:
     """Timer-trigger orchestration for the weekly ADP termed report email."""
-    del mytimer
-    settings = get_termed_report_settings()
-    logging.info(
-        "[INFO] scheduled_last_30_day_termed_report triggered "
-        f"(lookback_days={settings.lookback_days}, recipients={len(settings.recipients)})"
+    build_termed_report_orchestrator().run(mytimer)
+
+
+def build_worker_provider() -> DefaultWorkerProvider:
+    """Build the default ADP-backed worker provider for the termed report."""
+    return DefaultWorkerProvider(
+        get_token=get_adp_token,
+        get_workers=get_adp_employees,
+        dedupe_workers=dedupe_workers_by_employee_id,
+        log_duplicate_profiles=log_potential_duplicate_profiles,
     )
 
-    token = get_adp_token()
-    if not token:
-        logging.error("[ERROR] Failed to retrieve ADP token for termed report")
-        return
 
-    all_employees = get_adp_employees(token)
-    if all_employees is None:
-        logging.error("[ERROR] get_adp_employees returned None for termed report")
-        return
+def build_mail_gateway() -> DefaultMailGateway:
+    """Build the default SMTP-backed mail gateway."""
+    return DefaultMailGateway(send_report_email=send_termed_report_email)
 
-    recent_terminations, stats = select_recent_terminated_employees(
-        all_employees,
-        settings,
-        context="scheduled_last_30_day_termed_report",
-    )
-    rows = build_termed_report_rows(recent_terminations)
-    csv_content = render_termed_report_csv(rows)
 
-    try:
-        send_termed_report_email(
-            settings,
-            report_date=datetime.now(timezone.utc),
-            csv_content=csv_content,
-            row_count=len(rows),
-        )
-    except Exception as exc:
-        logging.error(
-            "[ERROR] Failed to email scheduled_last_30_day_termed_report "
-            f"(rows={len(rows)}, cutoff={stats['cutoff_iso']}): {exc}"
-        )
-        return
-
-    logging.info(
-        "[INFO] scheduled_last_30_day_termed_report complete "
-        f"(rows={len(rows)}, cutoff={stats['cutoff_iso']}, deduped={stats['deduped_count']}, "
-        f"missing_term_date={stats['missing_termination_date']}, "
-        f"invalid_term_date={stats['invalid_termination_date']}, "
-        f"outside_window={stats['outside_window']})"
+def build_termed_report_orchestrator() -> TermedReportOrchestrator:
+    """Build the termed report orchestrator with explicit service dependencies."""
+    return TermedReportOrchestrator(
+        worker_provider=build_worker_provider(),
+        mail_gateway=build_mail_gateway(),
+        select_recent_terminated_employees=select_recent_terminated_employees,
+        build_termed_report_rows=build_termed_report_rows,
+        render_termed_report_csv=render_termed_report_csv,
+        now_getter=lambda: datetime.now(timezone.utc),
+        settings_getter=get_termed_report_settings,
     )

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.constants import ATTR_MAIL, ATTR_USER_PRINCIPAL_NAME
 from app.ldap_client import diff_update_attributes
 from app.models import LdapSettings, UpdateJobSettings
@@ -278,3 +280,19 @@ def test_scheduled_update_only_targets_us_and_ca_users(monkeypatch, tmp_path):
         if search_filter.startswith("(employeeID=")
     ]
     assert employee_search_filters == ["(employeeID=EMPUS)", "(employeeID=EMPCA)"]
+
+
+def test_scheduled_update_raises_when_token_missing(monkeypatch):
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=True,
+            lookback_days=7,
+            include_missing_last_updated=True,
+            log_no_changes=False,
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: None)
+
+    with pytest.raises(RuntimeError, match="ADP token"):
+        run_scheduled_update_existing_users(None)

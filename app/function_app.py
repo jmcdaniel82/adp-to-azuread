@@ -14,7 +14,7 @@ app = func.FunctionApp()
 WEEKLY_TERMED_REPORT_SCHEDULE = os.getenv("TERMED_REPORT_SCHEDULE", "0 0 14 * * 1")
 
 
-@app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=True)
+@app.schedule(schedule="0 */15 * * * *", arg_name="mytimer", run_on_startup=False)
 def scheduled_provision_new_hires(mytimer: func.TimerRequest):
     """Provision AD accounts for recent hires."""
     run_scheduled_provision_new_hires(mytimer)

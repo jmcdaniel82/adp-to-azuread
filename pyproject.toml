@@ -17,3 +17,6 @@ warn_unused_ignores = true
 module = ["ldap3", "ldap3.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["azure", "azure.*", "azure.functions", "azure.functions.*"]
+ignore_missing_imports = true

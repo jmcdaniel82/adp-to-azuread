@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: 'release.zip'
   PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
@@ -55,8 +55,26 @@ jobs:
           ruff check app tests function_app.py
           mypy app
 
-      - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+      - name: Build deployment package
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          include_files = [
+              Path("function_app.py"),
+              Path("host.json"),
+              Path("requirements.txt"),
+          ]
+
+          with ZipFile("release.zip", "w", compression=ZIP_DEFLATED) as archive:
+              for path in include_files:
+                  archive.write(path, path.as_posix())
+              for path in Path("app").rglob("*"):
+                  if path.is_dir() or "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+                      continue
+                  archive.write(path, path.as_posix())
+          PY
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -79,9 +97,6 @@ jobs:
         with:
           name: python-app
 
-      - name: Unzip artifact for deployment
-        run: unzip release.zip     
-        
       - name: Login to Azure
         uses: azure/login@v2
         with:

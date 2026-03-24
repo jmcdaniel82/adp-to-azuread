@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import ssl
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -38,6 +37,8 @@ from .ldap_client import (
     make_conn_factory,
     safe_unbind,
 )
+from .services.defaults import DefaultWorkerProvider
+from .services.diagnostics_service import DiagnosticsDataService
 
 DEFAULT_RECENT_HIRES_LIMIT = 25
 MAX_RECENT_HIRES_LIMIT = 100
@@ -210,19 +211,29 @@ def build_department_diff_payload(
 
 def load_parallel_diagnostics_sources() -> tuple[Optional[list[dict[str, Any]]], Optional[dict[str, str]]]:
     """Fetch ADP workers and LDAP department map in parallel."""
-    token = get_adp_token()
-    if not token:
-        logging.error("Diagnostics route failed to retrieve ADP token.")
+    try:
+        return build_diagnostics_service().load_parallel_sources()
+    except Exception as exc:
+        logging.error(f"Parallel diagnostics data fetch failed: {exc}")
         return None, None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_adp = executor.submit(get_adp_employees, token)
-        future_ldap = executor.submit(fetch_ad_data_task)
-        try:
-            return future_adp.result(), future_ldap.result()
-        except Exception as exc:
-            logging.error(f"Parallel diagnostics data fetch failed: {exc}")
-            return None, None
+
+def build_worker_provider() -> DefaultWorkerProvider:
+    """Build the default ADP-backed worker provider for diagnostics."""
+    return DefaultWorkerProvider(
+        get_token=get_adp_token,
+        get_workers=get_adp_employees,
+        dedupe_workers=lambda workers, context: workers,
+        log_duplicate_profiles=lambda workers, context: None,
+    )
+
+
+def build_diagnostics_service() -> DiagnosticsDataService:
+    """Build the diagnostics data service with explicit dependencies."""
+    return DiagnosticsDataService(
+        worker_provider=build_worker_provider(),
+        fetch_department_map=fetch_ad_data_task,
+    )
 
 
 def parse_recent_hires_limit(params: dict[str, str]) -> tuple[int, Optional[func.HttpResponse]]:
@@ -256,6 +267,7 @@ def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
     params = get_request_params(req)
     view = params.get("view", "summary").strip().lower()
     logging.info(f"Diagnostics route triggered: view={view}")
+    diagnostics_service = build_diagnostics_service()
 
     if view not in SUPPORTED_DIAGNOSTICS_VIEWS:
         return json_response(
@@ -272,10 +284,10 @@ def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Diagnostics data fetch error (ADP or AD).", status_code=500)
 
         if view == "department-diff":
-            return json_response(build_department_diff_payload(adp_employees, ldap_map))
+            return json_response(diagnostics_service.build_department_diff_payload(adp_employees, ldap_map))
 
         active_total = sum(1 for emp in adp_employees if get_status(emp) == "Active")
-        diff_payload = build_department_diff_payload(adp_employees, ldap_map)
+        diff_payload = diagnostics_service.build_department_diff_payload(adp_employees, ldap_map)
         return json_response(
             {
                 "adpTotal": len(adp_employees),
@@ -286,8 +298,9 @@ def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
             }
         )
 
-    adp_employees = fetch_adp_employees()
-    if adp_employees is None:
+    try:
+        adp_employees = diagnostics_service.fetch_workers()
+    except Exception:
         return func.HttpResponse("ADP diagnostics fetch failed.", status_code=500)
 
     if view == "worker":
@@ -300,7 +313,7 @@ def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
         for emp in adp_employees:
             if normalize_id(extract_employee_id(emp)) != employee_id:
                 continue
-            snapshot = build_worker_snapshot(emp)
+            snapshot = diagnostics_service.build_worker_snapshot(emp)
             if snapshot is None:
                 return json_response(
                     {
@@ -320,7 +333,7 @@ def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
     sorted_emps = sorted(active_emps, key=lambda emp: get_hire_date(emp) or "", reverse=True)
     workers = []
     for emp in sorted_emps[:limit]:
-        snapshot = build_worker_snapshot(emp)
+        snapshot = diagnostics_service.build_worker_snapshot(emp)
         if snapshot is not None:
             workers.append(snapshot)
 

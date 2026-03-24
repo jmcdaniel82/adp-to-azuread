@@ -7,6 +7,15 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in live integration smoke coverage under `tests/integration/` for:
+  - ADP token and workers fetch,
+  - LDAP bind and search,
+  - SMTP report send,
+  - hosted diagnostics contract checks.
+- `docs/integration-tests.md` with environment gating and run instructions for the live suite.
+
 ### Refactored
 
 - Replaced monolithic `function_app.py` with a package-oriented architecture under `app/`:
@@ -15,6 +24,23 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - `app/security.py`, `app/adp_client.py`, `app/ldap_client.py`
   - `app/department_resolution.py`, `app/provisioning.py`, `app/updates.py`, `app/diagnostics_routes.py`
 - Root `function_app.py` is now a host shim that imports `app` from `app.function_app`.
+- Split ADP internals into focused modules under `app/adp/`:
+  - `api.py` for auth, mTLS, retries, and pagination,
+  - `workers.py` for payload extraction and normalization,
+  - `dedupe.py` for duplicate-profile diagnostics and `employeeID` dedupe.
+- Split LDAP internals into focused modules under `app/ldap/`:
+  - `connection.py` for server and bind lifecycle,
+  - `directory.py` for lookups and collision diagnostics,
+  - `updates.py` for planning, diffing, guardrails, and modify recovery.
+- Moved Department Resolution V2 implementation behind `app/department/resolver.py` while preserving `app/department_resolution.py` as a compatibility facade.
+- Introduced an explicit gateway/orchestrator layer under `app/services/`:
+  - `interfaces.py`
+  - `defaults.py`
+  - `provisioning_service.py`
+  - `update_service.py`
+  - `termed_report_service.py`
+  - `diagnostics_service.py`
+- Reduced `app/provisioning.py`, `app/updates.py`, and `app/termination_report.py` to thin builder/wrapper modules around the new service layer.
 
 ### Security
 
@@ -49,10 +75,14 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Added repo-local quality gate configuration via `pyproject.toml` for `ruff` and `mypy`.
 - Added CI verification workflow for tests, `py_compile`, lint, and type checks.
 - Hardened the Azure deployment workflow so verification runs before packaging and publish.
+- Deployment packaging now uses a curated `release.zip` and deploys that artifact directly instead of deploying the extracted workspace.
 - Added `local.settings.example.json` as the committed local configuration template while keeping `local.settings.json` out of source control.
 - Added staging smoke-test checklist for timer jobs, HTTP routes, ADP token retrieval, and LDAP bind/rebind validation.
 - Updated repository documentation to reflect the new package layout, Azure Functions v2 root shim, CI gates, and local secret-handling expectations.
 - Consolidated the old `process` and `export` HTTP endpoints into one `GET /api/diagnostics` route with explicit query-driven views.
+- Provisioning timer startup behavior was tightened by disabling cold-start execution (`run_on_startup=False`).
+- Fatal timer-path failures now raise exceptions instead of logging and returning success-like completions.
+- `mypy app` is now part of a passing local/CI contract after the Azure compatibility and service refactor cleanup.
 
 ### Added
 
