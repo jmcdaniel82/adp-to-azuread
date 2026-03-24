@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Any
 
-from .adp_client import (
+from .adp import (
     dedupe_workers_by_employee_id,
     extract_assignment_field,
     extract_business_title,

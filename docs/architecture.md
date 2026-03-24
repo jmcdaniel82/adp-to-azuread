@@ -60,19 +60,37 @@ Current schedules:
 
 - [`app/adp/`](../app/adp): focused ADP transport and parsing modules
   - [`api.py`](../app/adp/api.py): ADP auth, mTLS setup, bounded retries, and workers pagination
-  - [`workers.py`](../app/adp/workers.py): worker field extraction, normalization, and shared payload helpers
+  - [`dates.py`](../app/adp/dates.py): worker date parsing and hire/termination extraction
+  - [`identity.py`](../app/adp/identity.py): employeeID and account-string normalization
+  - [`names.py`](../app/adp/names.py): legal, preferred, and display-name helpers
+  - [`assignments.py`](../app/adp/assignments.py): department, manager, company, and location extraction
+  - [`status.py`](../app/adp/status.py): active/inactive derivation and AD userAccountControl mapping
+  - [`passwords.py`](../app/adp/passwords.py): password generation for provisioning
+  - [`workers.py`](../app/adp/workers.py): compatibility export surface for legacy worker-helper imports
   - [`dedupe.py`](../app/adp/dedupe.py): duplicate-profile logging and `employeeID` dedupe
 - [`app/ldap/`](../app/ldap): focused LDAP transport and directory modules
   - [`connection.py`](../app/ldap/connection.py): TLS config, server creation, bind/unbind, and transport diagnostics
   - [`directory.py`](../app/ldap/directory.py): AD lookup helpers and collision inspection
-  - [`updates.py`](../app/ldap/updates.py): attribute planning, diffing, denylist filtering, and modify recovery
+  - [`planning.py`](../app/ldap/planning.py): attribute planning, diffing, and denylist filtering
+  - [`modify.py`](../app/ldap/modify.py): modify transport and reconnect recovery
+  - [`updates.py`](../app/ldap/updates.py): compatibility wrapper preserving the legacy LDAP update import surface
 - [`app/adp_client.py`](../app/adp_client.py) and [`app/ldap_client.py`](../app/ldap_client.py): compatibility facades that preserve legacy import paths while delegating into the split packages
 
 ### Business Rules Layer
 
-- [`app/department/resolver.py`](../app/department/resolver.py): Department Resolution V2 engine
+- [`app/department/catalog.py`](../app/department/catalog.py): canonical departments, regex catalogs, and confidence constants
+- [`app/department/normalization.py`](../app/department/normalization.py): normalization and confidence-label helpers
+- [`app/department/signals.py`](../app/department/signals.py): ADP evidence collection across assignment payloads
+- [`app/department/title_inference.py`](../app/department/title_inference.py): title-based department inference
+- [`app/department/candidates.py`](../app/department/candidates.py): candidate mapping, scoring, and guardrail helpers
+- [`app/department/resolver.py`](../app/department/resolver.py): Department Resolution V2 orchestration and compatibility exports
 - [`app/department_resolution.py`](../app/department_resolution.py): compatibility facade for department resolution imports
 - [`docs/department-resolution-v2.md`](./department-resolution-v2.md): behavior reference for department mapping rules and fallbacks
+
+### Diagnostics Projection Layer
+
+- [`app/diagnostics/serializers.py`](../app/diagnostics/serializers.py): read-only worker, summary, department-diff, and recent-hires payload builders
+- [`app/diagnostics/__init__.py`](../app/diagnostics/__init__.py): diagnostics projection exports used by the diagnostics service
 
 ### Service Layer
 
@@ -86,6 +104,11 @@ Current schedules:
 ### Workflow Wrapper Layer
 
 - [`app/provisioning.py`](../app/provisioning.py): thin builder and compatibility wrapper for new-hire provisioning
+- [`app/provisioning_filters.py`](../app/provisioning_filters.py): recent-hire eligibility helper
+- [`app/provisioning_directory.py`](../app/provisioning_directory.py): existing-user, manager, and manager-department lookup helpers
+- [`app/provisioning_identity.py`](../app/provisioning_identity.py): create-time identifier and LDAP attribute planning
+- [`app/provisioning_create.py`](../app/provisioning_create.py): add retry loop, collision handling, and account enablement
+- [`app/provisioning_ops.py`](../app/provisioning_ops.py): provisioning create-path orchestration wrapper
 - [`app/updates.py`](../app/updates.py): thin builder and candidate-selection wrapper for existing-user updates
 - [`app/termination_report.py`](../app/termination_report.py): thin builder plus termed-report row/render/email helpers
 - [`app/diagnostics_routes.py`](../app/diagnostics_routes.py): HTTP diagnostics controller that delegates to the diagnostics data service
@@ -262,6 +285,8 @@ There is also an opt-in live integration layer under [`tests/integration/`](../t
 
 The live layer skips by default and only runs when the required environment variables are present. See [`docs/integration-tests.md`](./integration-tests.md).
 
+The live suite now includes a separately gated end-to-end update workflow smoke test with `dry_run=True`. That exercises the scheduled update path without enabling live write behavior.
+
 ### CI
 
 Verification is defined in [`verify.yml`](../.github/workflows/verify.yml):
@@ -315,11 +340,11 @@ Primary failure boundaries:
 
 ## Current Tradeoffs
 
-- The old public module names remain in place as compatibility facades. That protects imports and monkeypatch seams, but it does mean the repo carries both the new split packages and thin wrapper modules.
-- The heaviest remaining logic now lives in [`app/provisioning_ops.py`](../app/provisioning_ops.py), [`app/adp/workers.py`](../app/adp/workers.py), [`app/ldap/updates.py`](../app/ldap/updates.py), and [`app/department/resolver.py`](../app/department/resolver.py). The boundaries are cleaner, but those domains are still dense.
-- The current directory gateway opens and returns a directory context containing the live LDAP connection. That is a practical boundary for this refactor, but it still leaves some entry-level LDAP operations in the update and provisioning orchestrators.
-- The live integration layer is smoke-level by design. It validates live transport and hosted behavior without turning the default test run into an online or write-heavy suite.
-- Diagnostics and workflows now share service and helper modules intentionally. That reduces duplicated parsing logic, but some coupling remains at the shared-domain-helper level.
+- The old public module names remain in place as compatibility facades for external imports and test seams, but internal application code now imports the split packages directly.
+- The previous single-file hotspots are now split across focused helper modules. The densest remaining logic is mostly in [`app/provisioning_create.py`](../app/provisioning_create.py), [`app/adp/assignments.py`](../app/adp/assignments.py), and [`app/department/candidates.py`](../app/department/candidates.py), where the domain complexity still naturally lives.
+- The directory gateway now owns update-path employee lookup, department lookup, and change application. The remaining live LDAP connection exposure is concentrated in the create-user path used by provisioning operations.
+- The live integration layer now covers transport smoke plus a gated update-workflow dry run, but it is still intentionally not a full write-path end-to-end suite.
+- Diagnostics projections now live in their own package, which reduces route/service duplication. Some shared helper coupling remains because diagnostics and workflows still consume the same ADP and department-domain rules.
 
 ## Extension Points
 
@@ -331,9 +356,10 @@ Primary failure boundaries:
   - add tests under [`tests/`](../tests)
 - To change synced AD attributes:
   - update [`app/constants.py`](../app/constants.py)
-  - update planning and diff logic in [`app/ldap/updates.py`](../app/ldap/updates.py)
+  - update planning logic in [`app/ldap/planning.py`](../app/ldap/planning.py)
+  - update modify/recovery behavior in [`app/ldap/modify.py`](../app/ldap/modify.py)
 - To evolve department mapping:
-  - update [`app/department/resolver.py`](../app/department/resolver.py)
+  - update [`app/department/catalog.py`](../app/department/catalog.py), [`app/department/candidates.py`](../app/department/candidates.py), and [`app/department/resolver.py`](../app/department/resolver.py)
   - keep [`docs/department-resolution-v2.md`](./department-resolution-v2.md) aligned
   - update [`tests/test_department_resolution.py`](../tests/test_department_resolution.py)
 - To add diagnostics views:

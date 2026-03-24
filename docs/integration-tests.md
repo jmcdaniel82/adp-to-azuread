@@ -17,6 +17,7 @@ The live tests cover:
 - LDAP TLS connectivity and search smoke
 - SMTP send smoke for the termed report
 - Azure-hosted diagnostics endpoint smoke
+- End-to-end scheduled update workflow smoke with `dry_run=True` and a short lookback window
 
 ## Required Environment Variables
 
@@ -49,6 +50,11 @@ The live tests cover:
 - `DIAGNOSTICS_BEARER_TOKEN` optional
 - `DIAGNOSTICS_VIEW` optional, defaults to `summary`
 
+### Workflow Dry Run
+
+- `ENABLE_UPDATE_DRY_RUN_LIVE_TEST`
+- ADP and LDAP variables above
+
 ## Run
 
 ```powershell
@@ -57,3 +63,6 @@ pytest -q tests/integration
 
 If the live env vars are not present, the modules skip at import time.
 
+The update workflow smoke test is additionally gated behind
+`ENABLE_UPDATE_DRY_RUN_LIVE_TEST` so it does not run accidentally even when ADP
+and LDAP credentials are available.

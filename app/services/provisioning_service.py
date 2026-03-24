@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from ..adp_client import extract_employee_id, get_display_name, get_hire_date, get_legal_first_last
+from ..adp import extract_employee_id, get_display_name, get_hire_date, get_legal_first_last
 from ..config import get_provision_job_settings
 from ..models import ProvisionJobSettings
 from ..reporting import inc_stat

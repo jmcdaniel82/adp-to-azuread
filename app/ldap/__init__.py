@@ -18,8 +18,8 @@ from .directory import (
     get_manager_dn,
     log_cn_conflict_inventory,
 )
-from .updates import (
-    apply_ldap_modifications,
+from .modify import apply_ldap_modifications
+from .planning import (
     build_update_attributes,
     diff_update_attributes,
     filter_blocked_update_changes,

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from . import provisioning_ops as _provisioning_ops
-from .adp_client import (
+from .adp import (
     dedupe_workers_by_employee_id,
     get_adp_employees,
     get_adp_token,
     log_potential_duplicate_profiles,
 )
 from .config import get_ldap_settings, get_provision_job_settings, validate_ldap_settings
-from .ldap_client import (
+from .ldap import (
+    apply_ldap_modifications,
     collect_identifier_conflicts,
     create_ldap_server,
     dn_exists_in_create_scope,
+    get_department_by_dn,
     log_ldap_target_details,
     make_conn_factory,
     safe_unbind,
@@ -49,6 +51,8 @@ def build_directory_gateway() -> DefaultDirectoryGateway:
         log_target_details=log_ldap_target_details,
         create_server=create_ldap_server,
         make_conn_factory=make_conn_factory,
+        get_department_by_dn=get_department_by_dn,
+        apply_changes=apply_ldap_modifications,
         safe_unbind=safe_unbind,
     )
 

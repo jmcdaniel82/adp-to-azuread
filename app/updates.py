@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .adp_client import (
+from .adp import (
     dedupe_workers_by_employee_id,
     extract_last_updated,
     extract_work_address_field,
@@ -15,7 +15,7 @@ from .adp_client import (
     log_potential_duplicate_profiles,
 )
 from .config import get_ldap_settings, get_update_job_settings, validate_ldap_settings
-from .ldap_client import (
+from .ldap import (
     apply_ldap_modifications,
     build_update_attributes,
     create_ldap_server,
@@ -103,6 +103,8 @@ def build_directory_gateway() -> DefaultDirectoryGateway:
         log_target_details=log_ldap_target_details,
         create_server=create_ldap_server,
         make_conn_factory=make_conn_factory,
+        get_department_by_dn=get_department_by_dn,
+        apply_changes=apply_ldap_modifications,
         safe_unbind=safe_unbind,
     )
 
@@ -117,8 +119,6 @@ def build_update_orchestrator() -> UpdateOrchestrator:
         build_update_attributes=build_update_attributes,
         diff_update_attributes=diff_update_attributes,
         entry_attr_value=entry_attr_value,
-        get_department_by_dn=get_department_by_dn,
         is_bind_lost_result=is_bind_lost_result,
-        apply_ldap_modifications=apply_ldap_modifications,
         settings_getter=get_update_job_settings,
     )

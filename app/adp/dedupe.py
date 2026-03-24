@@ -6,18 +6,15 @@ import logging
 import os
 import re
 
-from .workers import (
-    _parse_datetime_silent,
+from .assignments import (
     extract_assignment_field,
     extract_business_title,
     extract_department,
-    extract_employee_id,
-    extract_last_updated,
     extract_manager_id,
-    get_display_name,
-    get_hire_date,
-    normalize_id,
 )
+from .dates import _parse_datetime_silent, extract_last_updated, get_hire_date
+from .identity import extract_employee_id, normalize_id
+from .names import get_display_name
 
 
 def _dedupe_recency_key(emp: dict, index: int) -> tuple[int, float, int]:

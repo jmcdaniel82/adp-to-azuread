@@ -18,6 +18,15 @@ class DirectoryContext:
     conn_factory: Callable[[], Any]
 
 
+@dataclass(frozen=True)
+class DirectoryLookup:
+    """Result of a directory lookup keyed by one identity attribute."""
+
+    found: bool
+    entry: Any | None
+    result: dict[str, Any]
+
+
 class WorkerProvider(Protocol):
     """Fetch and post-process ADP workers for orchestration flows."""
 
@@ -38,6 +47,28 @@ class DirectoryGateway(Protocol):
         require_create_base: bool,
         tls_version: int | None = None,
     ) -> DirectoryContext: ...
+
+    def find_user_by_employee_id(
+        self,
+        directory: DirectoryContext,
+        employee_id: str,
+        *,
+        attributes: list[str],
+        search_scope: int = 2,
+    ) -> DirectoryLookup: ...
+
+    def get_department_by_dn(
+        self,
+        directory: DirectoryContext,
+        dn: str,
+    ) -> str: ...
+
+    def apply_changes(
+        self,
+        directory: DirectoryContext,
+        dn: str,
+        changes: dict,
+    ) -> DirectoryContext | None: ...
 
     def close(self, conn: Any, *, context: str) -> None: ...
 

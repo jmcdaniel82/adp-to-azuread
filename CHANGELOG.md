@@ -26,13 +26,16 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Root `function_app.py` is now a host shim that imports `app` from `app.function_app`.
 - Split ADP internals into focused modules under `app/adp/`:
   - `api.py` for auth, mTLS, retries, and pagination,
-  - `workers.py` for payload extraction and normalization,
+  - `dates.py`, `identity.py`, `names.py`, `assignments.py`, `status.py`, and `passwords.py` for focused worker parsing domains,
+  - `workers.py` as the compatibility export surface,
   - `dedupe.py` for duplicate-profile diagnostics and `employeeID` dedupe.
 - Split LDAP internals into focused modules under `app/ldap/`:
   - `connection.py` for server and bind lifecycle,
   - `directory.py` for lookups and collision diagnostics,
-  - `updates.py` for planning, diffing, guardrails, and modify recovery.
-- Moved Department Resolution V2 implementation behind `app/department/resolver.py` while preserving `app/department_resolution.py` as a compatibility facade.
+  - `planning.py` and `modify.py` for update planning and transport recovery,
+  - `updates.py` as the compatibility wrapper.
+- Split Department Resolution V2 into `catalog.py`, `normalization.py`, `signals.py`, `title_inference.py`, `candidates.py`, and `resolver.py` while preserving `app/department_resolution.py` as a compatibility facade.
+- Split provisioning create-path logic into `provisioning_filters.py`, `provisioning_directory.py`, `provisioning_identity.py`, `provisioning_create.py`, and a thinner `provisioning_ops.py` orchestration wrapper.
 - Introduced an explicit gateway/orchestrator layer under `app/services/`:
   - `interfaces.py`
   - `defaults.py`

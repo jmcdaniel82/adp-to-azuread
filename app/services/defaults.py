@@ -7,7 +7,7 @@ import ssl
 from typing import Any, Callable, Optional
 
 from ..models import LdapSettings
-from .interfaces import DirectoryContext, DirectoryGateway, MailGateway, WorkerProvider
+from .interfaces import DirectoryContext, DirectoryGateway, DirectoryLookup, MailGateway, WorkerProvider
 
 
 class DefaultWorkerProvider(WorkerProvider):
@@ -53,6 +53,8 @@ class DefaultDirectoryGateway(DirectoryGateway):
         log_target_details: Callable[..., None],
         create_server: Callable[..., Any],
         make_conn_factory: Callable[..., Callable[[], Any]],
+        get_department_by_dn: Callable[[Any, str], str],
+        apply_changes: Callable[..., Any],
         safe_unbind: Callable[[Any, str], None],
     ) -> None:
         self._validate_settings = validate_settings
@@ -60,6 +62,8 @@ class DefaultDirectoryGateway(DirectoryGateway):
         self._log_target_details = log_target_details
         self._create_server = create_server
         self._make_conn_factory = make_conn_factory
+        self._get_department_by_dn = get_department_by_dn
+        self._apply_changes = apply_changes
         self._safe_unbind = safe_unbind
 
     def open_directory(
@@ -89,6 +93,46 @@ class DefaultDirectoryGateway(DirectoryGateway):
         except Exception as exc:
             raise RuntimeError(f"Failed to connect to LDAP server for {context}.") from exc
         return DirectoryContext(conn=conn, settings=settings, conn_factory=conn_factory)
+
+    def find_user_by_employee_id(
+        self,
+        directory: DirectoryContext,
+        employee_id: str,
+        *,
+        attributes: list[str],
+        search_scope: int = 2,
+    ) -> DirectoryLookup:
+        found = directory.conn.search(
+            directory.settings.search_base,
+            f"(employeeID={employee_id})",
+            attributes=attributes,
+            search_scope=search_scope,
+        )
+        entry = directory.conn.entries[0] if getattr(directory.conn, "entries", None) else None
+        result = getattr(directory.conn, "result", None) or {}
+        return DirectoryLookup(found=bool(found), entry=entry, result=result)
+
+    def get_department_by_dn(
+        self,
+        directory: DirectoryContext,
+        dn: str,
+    ) -> str:
+        return self._get_department_by_dn(directory.conn, dn)
+
+    def apply_changes(
+        self,
+        directory: DirectoryContext,
+        dn: str,
+        changes: dict,
+    ) -> DirectoryContext | None:
+        conn = self._apply_changes(directory.conn, dn, changes, directory.conn_factory)
+        if not conn:
+            return None
+        return DirectoryContext(
+            conn=conn,
+            settings=directory.settings,
+            conn_factory=directory.conn_factory,
+        )
 
     def close(self, conn: Any, *, context: str) -> None:
         self._safe_unbind(conn, context)

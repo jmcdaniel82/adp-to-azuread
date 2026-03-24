@@ -29,14 +29,27 @@ app/
   security.py                 # cert/key materialization + deterministic temp cleanup
   adp/
     api.py                    # ADP auth, mTLS, retries, pagination
-    workers.py                # worker parsing and normalization
+    dates.py                  # worker date parsing and hire/term extraction
+    identity.py               # employeeID and account-string normalization
+    names.py                  # legal/preferred/display name helpers
+    assignments.py            # work-assignment, department, manager, and location extraction
+    status.py                 # active/inactive derivation and AD UAC mapping
+    passwords.py              # random AD password generation
+    workers.py                # compatibility export surface for worker helpers
     dedupe.py                 # duplicate-profile diagnostics and employeeID dedupe
   ldap/
     connection.py             # LDAP TLS/server/bind lifecycle
     directory.py              # lookup helpers and collision inspection
-    updates.py                # update planning, diffing, guardrails, modify recovery
+    planning.py               # update planning, diffing, and guardrails
+    modify.py                 # modify transport and reconnect recovery
+    updates.py                # compatibility wrapper for legacy LDAP update imports
   department/
-    resolver.py               # Department Resolution V2 implementation
+    catalog.py                # regex/rule catalogs and canonical department sets
+    normalization.py          # normalization and confidence helpers
+    signals.py                # ADP signal collection for department evidence
+    title_inference.py        # title-based department inference
+    candidates.py             # candidate scoring and guardrail helpers
+    resolver.py               # Department Resolution V2 orchestration
   services/
     interfaces.py             # worker/directory/mail gateway contracts
     defaults.py               # default ADP, LDAP, SMTP adapters
@@ -45,7 +58,11 @@ app/
     termed_report_service.py  # termed report orchestration
     diagnostics_service.py    # diagnostics projections and parallel source loading
   provisioning.py             # thin builder + compatibility wrapper
-  provisioning_ops.py         # account creation and collision workflow
+  provisioning_ops.py         # thin create-path orchestration wrapper
+  provisioning_filters.py     # recent-hire filtering helpers
+  provisioning_directory.py   # existing-user and manager lookup helpers
+  provisioning_identity.py    # create-time identifier and attribute planning
+  provisioning_create.py      # LDAP add retries, collision handling, account enablement
   updates.py                  # thin builder + candidate selection
   termination_report.py       # thin builder + report row/render/email helpers
   diagnostics_routes.py       # HTTP diagnostics controller

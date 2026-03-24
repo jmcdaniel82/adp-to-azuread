@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from ..adp_client import extract_employee_id
+from ..adp import extract_employee_id
 from ..config import get_update_job_settings
 from ..constants import AD_UPDATE_SEARCH_ATTRIBUTES
 from ..models import UpdateJobSettings
@@ -25,9 +25,7 @@ class UpdateOrchestrator:
         build_update_attributes: Callable[..., dict],
         diff_update_attributes: Callable[..., dict],
         entry_attr_value: Callable[..., object],
-        get_department_by_dn: Callable[..., str],
         is_bind_lost_result: Callable[[dict], bool],
-        apply_ldap_modifications: Callable[..., object],
         settings_getter: Callable[[], UpdateJobSettings] = get_update_job_settings,
     ) -> None:
         self._worker_provider = worker_provider
@@ -37,9 +35,7 @@ class UpdateOrchestrator:
         self._build_update_attributes = build_update_attributes
         self._diff_update_attributes = diff_update_attributes
         self._entry_attr_value = entry_attr_value
-        self._get_department_by_dn = get_department_by_dn
         self._is_bind_lost_result = is_bind_lost_result
-        self._apply_ldap_modifications = apply_ldap_modifications
         self._settings_getter = settings_getter
 
     def run(self, mytimer) -> None:
@@ -81,7 +77,6 @@ class UpdateOrchestrator:
             context="Update",
             require_create_base=False,
         )
-        conn = directory.conn
         logging.info("[INFO] LDAP connection opened for update")
         updated_users = 0
         total_changes = 0
@@ -93,21 +88,23 @@ class UpdateOrchestrator:
                 if not emp_id:
                     continue
                 try:
-                    found = conn.search(
-                        directory.settings.search_base,
-                        f"(employeeID={emp_id})",
+                    lookup = self._directory_gateway.find_user_by_employee_id(
+                        directory,
+                        emp_id,
                         attributes=AD_UPDATE_SEARCH_ATTRIBUTES,
                         search_scope=2,
                     )
                 except Exception as exc:
                     logging.error(f"LDAP search exception for {emp_id}: {exc}")
                     try:
-                        self._directory_gateway.close(conn, context=f"update search exception for {emp_id}")
+                        self._directory_gateway.close(
+                            directory.conn,
+                            context=f"update search exception for {emp_id}",
+                        )
                         directory = self._directory_gateway.open_directory(
                             context="Update",
                             require_create_base=False,
                         )
-                        conn = directory.conn
                     except Exception as reconnect_error:
                         logging.error(
                             f"Reconnect failed after search exception for {emp_id}: {reconnect_error}"
@@ -118,15 +115,17 @@ class UpdateOrchestrator:
                         )
                         break
                     continue
-                if not found and self._is_bind_lost_result(getattr(conn, "result", None) or {}):
+                if not lookup.found and self._is_bind_lost_result(lookup.result):
                     logging.warning(f"Bind lost during update search for {emp_id}; reconnecting")
                     try:
-                        self._directory_gateway.close(conn, context=f"update search bind-loss for {emp_id}")
+                        self._directory_gateway.close(
+                            directory.conn,
+                            context=f"update search bind-loss for {emp_id}",
+                        )
                         directory = self._directory_gateway.open_directory(
                             context="Update",
                             require_create_base=False,
                         )
-                        conn = directory.conn
                     except Exception as reconnect_error:
                         logging.error(
                             f"Reconnect failed after bind-loss search for {emp_id}: {reconnect_error}"
@@ -137,22 +136,24 @@ class UpdateOrchestrator:
                         )
                         break
                     continue
-                if not conn.entries:
+                if not lookup.entry:
                     missing_in_ad += 1
                     continue
-                entry = conn.entries[0]
-                dn = self._entry_attr_value(entry, "distinguishedName") or "<unknown DN>"
+                entry = lookup.entry
+                dn = str(self._entry_attr_value(entry, "distinguishedName") or "<unknown DN>")
                 if self._is_terminated_employee(emp):
                     desired = {"userAccountControl": 514}
                 else:
                     current_department = str(self._entry_attr_value(entry, "department") or "").strip()
                     current_manager_dn = str(self._entry_attr_value(entry, "manager") or "").strip()
                     current_manager_department = (
-                        self._get_department_by_dn(conn, current_manager_dn) if current_manager_dn else ""
+                        self._directory_gateway.get_department_by_dn(directory, current_manager_dn)
+                        if current_manager_dn
+                        else ""
                     )
                     desired = self._build_update_attributes(
                         emp,
-                        conn,
+                        directory.conn,
                         directory.settings.search_base,
                         current_ad_department=current_department,
                         manager_department=current_manager_department,
@@ -174,15 +175,19 @@ class UpdateOrchestrator:
                         logging.info(f"Updating {emp_id} {attr}: '{current_val}' -> '{desired_val}'")
                 total_changes += len(changes)
                 if not settings.dry_run:
-                    conn = self._apply_ldap_modifications(conn, dn, changes, directory.conn_factory)
-                    if not conn:
+                    updated_directory = self._directory_gateway.apply_changes(directory, dn, changes)
+                    if not updated_directory:
                         logging.error("LDAP connection unavailable; aborting scheduled_update_existing_users")
                         fatal_error_message = (
                             "LDAP connection unavailable during scheduled_update_existing_users."
                         )
                         break
+                    directory = updated_directory
         finally:
-            self._directory_gateway.close(conn, context="scheduled_update_existing_users completion")
+            self._directory_gateway.close(
+                directory.conn,
+                context="scheduled_update_existing_users completion",
+            )
             logging.info(
                 f"[INFO] LDAP connection closed - scheduled_update_existing_users complete "
                 f"(users_with_changes={updated_users}, total_changes={total_changes}, "
