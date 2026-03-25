@@ -139,90 +139,24 @@ The key boundary is `wrappers -> services -> adapters/packages`. The wrappers st
 - The diagnostics route is the only inbound HTTP surface exposed by application code.
 - In deployed environments, the main site is intended to be IP-allowlisted while the SCM site remains separately reachable for deployment workflows.
 
-## Module Layout
+## Code Layout
 
-### Entrypoint Layer
+| Layer | Primary modules | Responsibility |
+| --- | --- | --- |
+| Entrypoints | [`function_app.py`](../function_app.py), [`app/function_app.py`](../app/function_app.py) | Azure Functions discovery plus decorated trigger and route wiring only |
+| Core | [`app/config.py`](../app/config.py), [`app/models.py`](../app/models.py), [`app/constants.py`](../app/constants.py), [`app/reporting.py`](../app/reporting.py) | typed settings, shared constants, and run-summary helpers |
+| Security | [`app/security.py`](../app/security.py) | certificate/key materialization, CA bundle resolution, and deterministic temp-file cleanup |
+| ADP integration | [`app/adp/`](../app/adp), [`app/adp_client.py`](../app/adp_client.py) | ADP auth, mTLS, retries, pagination, dedupe, and worker parsing |
+| LDAP integration | [`app/ldap/`](../app/ldap), [`app/ldap_client.py`](../app/ldap_client.py) | bind/search/modify transport, update planning, reconnect recovery, and write-scope enforcement |
+| Department rules | [`app/department/`](../app/department), [`app/department_resolution.py`](../app/department_resolution.py), [`docs/department-resolution-v2.md`](./department-resolution-v2.md) | canonical department mapping, confidence rules, and guardrails |
+| Diagnostics projections | [`app/diagnostics/`](../app/diagnostics), [`app/diagnostics_routes.py`](../app/diagnostics_routes.py) | read-only diagnostics views and HTTP controller logic |
+| Services | [`app/services/`](../app/services) | workflow orchestration plus gateway contracts and default adapters |
+| Workflow helpers | [`app/provisioning.py`](../app/provisioning.py), [`app/updates.py`](../app/updates.py), [`app/termination_report.py`](../app/termination_report.py), [`app/provisioning_*`](../app) | thin builders, wrappers, and focused provisioning helpers |
+| Compatibility and tests | [`app/azure_compat.py`](../app/azure_compat.py), [`tests/`](../tests), [`tests/integration/`](../tests/integration), [`docs/integration-tests.md`](./integration-tests.md) | local import shim plus unit and opt-in live verification |
 
-- [`function_app.py`](../function_app.py): Azure Functions root discovery shim
-- [`app/function_app.py`](../app/function_app.py): decorated schedule and route handlers only
+The core boundary remains `entrypoints -> services -> adapters/packages`. Compatibility facades exist to preserve legacy imports, but internal code primarily uses the split packages directly.
 
-### Config And Type Layer
-
-- [`app/config.py`](../app/config.py): environment parsing, defaults, and validation
-- [`app/models.py`](../app/models.py): typed settings and diagnostics/domain result models
-- [`app/constants.py`](../app/constants.py): LDAP attribute names, ADP HTTP defaults, update denylist, and search attribute lists
-- [`app/reporting.py`](../app/reporting.py): cross-cutting summary-counter helper used by provisioning and other orchestration paths
-
-### Security And Secret Materialization
-
-- [`app/security.py`](../app/security.py): resolves certificate and key material from env vars, supports path/PEM/base64 input, caches temp files, and cleans them up via `atexit`
-
-### Integration Layer
-
-- [`app/adp/`](../app/adp): focused ADP transport and parsing modules
-  - [`api.py`](../app/adp/api.py): ADP auth, mTLS setup, bounded retries, and workers pagination
-  - [`dates.py`](../app/adp/dates.py): worker date parsing and hire/termination extraction
-  - [`identity.py`](../app/adp/identity.py): employeeID and account-string normalization
-  - [`names.py`](../app/adp/names.py): legal, preferred, and display-name helpers
-  - [`assignments.py`](../app/adp/assignments.py): department, manager, company, and location extraction
-  - [`status.py`](../app/adp/status.py): active/inactive derivation and AD userAccountControl mapping
-  - [`passwords.py`](../app/adp/passwords.py): password generation for provisioning
-  - [`workers.py`](../app/adp/workers.py): compatibility export surface for legacy worker-helper imports
-  - [`dedupe.py`](../app/adp/dedupe.py): duplicate-profile logging and `employeeID` dedupe
-- [`app/ldap/`](../app/ldap): focused LDAP transport and directory modules
-  - [`connection.py`](../app/ldap/connection.py): TLS config, server creation, bind/unbind, and transport diagnostics
-  - [`directory.py`](../app/ldap/directory.py): AD lookup helpers and collision inspection
-  - [`planning.py`](../app/ldap/planning.py): attribute planning, diffing, and denylist filtering
-  - [`modify.py`](../app/ldap/modify.py): modify transport and reconnect recovery
-  - [`scope.py`](../app/ldap/scope.py): DN normalization and add/modify/finalize write-scope enforcement
-  - [`updates.py`](../app/ldap/updates.py): compatibility wrapper preserving the legacy LDAP update import surface
-- [`app/adp_client.py`](../app/adp_client.py) and [`app/ldap_client.py`](../app/ldap_client.py): compatibility facades that preserve legacy import paths while delegating into the split packages
-
-### Business Rules Layer
-
-- [`app/department/catalog.py`](../app/department/catalog.py): canonical departments, regex catalogs, and confidence constants
-- [`app/department/normalization.py`](../app/department/normalization.py): normalization and confidence-label helpers
-- [`app/department/signals.py`](../app/department/signals.py): ADP evidence collection across assignment payloads
-- [`app/department/title_inference.py`](../app/department/title_inference.py): title-based department inference
-- [`app/department/candidates.py`](../app/department/candidates.py): candidate mapping, scoring, and guardrail helpers
-- [`app/department/resolver.py`](../app/department/resolver.py): Department Resolution V2 orchestration and compatibility exports
-- [`app/department_resolution.py`](../app/department_resolution.py): compatibility facade for department resolution imports
-- [`docs/department-resolution-v2.md`](./department-resolution-v2.md): behavior reference for department mapping rules and fallbacks
-
-### Diagnostics Projection Layer
-
-- [`app/diagnostics/serializers.py`](../app/diagnostics/serializers.py): read-only worker, summary, department-diff, and recent-hires payload builders
-- [`app/diagnostics/__init__.py`](../app/diagnostics/__init__.py): diagnostics projection exports used by the diagnostics service
-
-### Service Layer
-
-- [`app/services/interfaces.py`](../app/services/interfaces.py): protocol-style gateway contracts and opened-directory context
-- [`app/services/defaults.py`](../app/services/defaults.py): default ADP, LDAP, and SMTP gateway adapters built from the existing helper functions
-- [`app/services/provisioning_service.py`](../app/services/provisioning_service.py): provisioning workflow orchestrator
-- [`app/services/update_service.py`](../app/services/update_service.py): update workflow orchestrator
-- [`app/services/termed_report_service.py`](../app/services/termed_report_service.py): termed-report workflow orchestrator
-- [`app/services/diagnostics_service.py`](../app/services/diagnostics_service.py): diagnostics query service and shared projections
-
-### Workflow Wrapper Layer
-
-- [`app/provisioning.py`](../app/provisioning.py): thin builder and compatibility wrapper for new-hire provisioning
-- [`app/provisioning_filters.py`](../app/provisioning_filters.py): recent-hire eligibility helper
-- [`app/provisioning_directory.py`](../app/provisioning_directory.py): existing-user, manager, and manager-department lookup helpers
-- [`app/provisioning_identity.py`](../app/provisioning_identity.py): create-time identifier and LDAP attribute planning
-- [`app/provisioning_create.py`](../app/provisioning_create.py): add retry loop, collision handling, and account enablement
-- [`app/provisioning_ops.py`](../app/provisioning_ops.py): provisioning create-path orchestration wrapper
-- [`app/updates.py`](../app/updates.py): thin builder and candidate-selection wrapper for existing-user updates
-- [`app/termination_report.py`](../app/termination_report.py): thin builder plus termed-report row/render/email helpers
-- [`app/diagnostics_routes.py`](../app/diagnostics_routes.py): HTTP diagnostics controller that delegates to the diagnostics data service
-
-### Compatibility And Test Support
-
-- [`app/azure_compat.py`](../app/azure_compat.py): import shim so local tests can import the package when `azure-functions` is unavailable
-- [`tests/`](../tests): unit and orchestration-behavior coverage aligned to the package structure
-- [`tests/integration/`](../tests/integration): opt-in live smoke coverage for ADP, LDAP, SMTP, and hosted diagnostics
-- [`docs/integration-tests.md`](./integration-tests.md): required env vars and run instructions for the live test layer
-
-## Execution Flows
+## Workflow Summaries
 
 ### Provisioning Flow
 
@@ -230,23 +164,12 @@ Handler path:
 
 - [`app/function_app.py`](../app/function_app.py) -> [`app/provisioning.py`](../app/provisioning.py) -> [`app/services/provisioning_service.py`](../app/services/provisioning_service.py)
 
-Flow summary:
+Summary:
 
-1. Timer fires.
-2. Fetch ADP token.
-3. Fetch ADP workers and dedupe by `employeeID`.
-4. Filter to recent hires inside `SYNC_HIRE_LOOKBACK_DAYS`.
-5. Validate LDAP config and CA bundle.
-6. Open LDAP connection.
-7. For each recent hire:
-   - check if user already exists by `employeeID`
-   - resolve manager DN
-   - resolve department via Department Resolution V2
-   - build deterministic CN, `sAMAccountName`, UPN, and mail values
-   - create the account with collision and bind-loss handling
-   - set password and enable the account
-8. Log a run summary.
-9. Raise `RuntimeError` on fatal orchestration failures so the Functions host can treat the invocation as failed.
+- fetch ADP workers, dedupe by `employeeID`, and filter to the hire lookback window
+- open LDAP, check for existing users by `employeeID`, resolve manager and department context, and build deterministic account identifiers
+- create accounts with collision-aware retries, then set the initial password and enable the account
+- log run-summary counters and raise on fatal orchestration failures
 
 ### Update Flow
 
@@ -254,22 +177,12 @@ Handler path:
 
 - [`app/function_app.py`](../app/function_app.py) -> [`app/updates.py`](../app/updates.py) -> [`app/services/update_service.py`](../app/services/update_service.py)
 
-Flow summary:
+Summary:
 
-1. Timer fires.
-2. Fetch ADP token.
-3. Fetch ADP workers and dedupe by `employeeID`.
-4. Select update candidates from ADP based on `UPDATE_LOOKBACK_DAYS`, `UPDATE_INCLUDE_MISSING_LAST_UPDATED`, and country filtering.
-5. Validate LDAP config and CA bundle.
-6. Open LDAP connection.
-7. For each candidate:
-   - search AD by `employeeID`
-   - if terminated, target `userAccountControl=514`
-   - otherwise compute desired attributes with LDAP planner and department resolution
-   - diff desired vs current AD attributes
-   - log a dry-run or apply modifications
-8. Preserve create-time-only email routing identifiers by filtering them from update changes.
-9. Raise `RuntimeError` on fatal orchestration failures so the Functions host can treat the invocation as failed.
+- fetch and dedupe ADP workers, then select update candidates from the configured lookback window
+- look up AD users by `employeeID`, derive desired attributes through the LDAP planner and department resolver, and diff against current state
+- log dry-run changes by default or apply bounded LDAP modifications when dry run is disabled
+- preserve create-time-only routing identifiers by filtering them out of update changes
 
 ### Termed Report Flow
 
@@ -277,16 +190,11 @@ Handler path:
 
 - [`app/function_app.py`](../app/function_app.py) -> [`app/termination_report.py`](../app/termination_report.py) -> [`app/services/termed_report_service.py`](../app/services/termed_report_service.py)
 
-Flow summary:
+Summary:
 
-1. Timer fires.
-2. Fetch ADP token.
-3. Fetch ADP workers and dedupe by `employeeID`.
-4. Filter to workers terminated inside `TERMED_REPORT_LOOKBACK_DAYS`.
-5. Project rows for CSV output.
-6. Render CSV in memory.
-7. Send the email through SMTP.
-8. Raise `RuntimeError` on fatal orchestration failures so the Functions host can treat the invocation as failed.
+- fetch and dedupe ADP workers, filter to the rolling termed-report lookback window, and project compact CSV rows
+- render the CSV in memory and deliver it over SMTP
+- fail the invocation when report delivery fails
 
 ### Diagnostics Flow
 
@@ -294,63 +202,19 @@ Handler path:
 
 - [`app/function_app.py`](../app/function_app.py) -> [`app/diagnostics_routes.py`](../app/diagnostics_routes.py) -> [`app/services/diagnostics_service.py`](../app/services/diagnostics_service.py)
 
-Flow summary:
+Summary:
 
-1. HTTP GET arrives at `/api/diagnostics` under the deployed App Service authentication policy and the main-site IP allowlist.
-2. The route handler requires the App Service auth principal headers when `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH=true`.
-3. Query parameter `view` selects the diagnostics mode.
-4. `summary` and `department-diff` fetch ADP and LDAP data in parallel.
-5. `worker` and `recent-hires` fetch ADP only.
-6. Results are returned as JSON with bounded, explicit response shapes.
+- accept requests only after App Service authentication and main-site IP allowlisting, with an additional in-app principal-header check when enabled
+- dispatch by explicit `view` mode rather than exposing a generic browse surface
+- fetch ADP and LDAP in parallel for `summary` and `department-diff`, while `worker` and `recent-hires` stay ADP-only
 
-## Data Flow
-
-### ADP Acquisition
-
-ADP source acquisition is implemented in [`app/adp/`](../app/adp) and exposed through [`app/adp_client.py`](../app/adp_client.py):
-
-- token retrieval uses client credentials plus mTLS certificate material
-- outbound HTTP uses bounded retries with exponential backoff
-- workers are paginated with `$top` and `$skip`
-- worker payloads are normalized through shared helper functions instead of repeated shape parsing
-
-### Domain Decision Path
-
-Department mapping is a distinct subsystem:
-
-- provisioning uses it when creating accounts
-- update sync uses it when deriving desired department changes
-
-The resolver merges multiple evidence sources:
-
-- cost center description
-- assigned and home departments
-- manager department
-- title inference
-- occupational classifications
-- legacy department signals
-
-It then applies canonical mapping, admin gating, manager-alignment guardrails, and fallback behavior.
-
-### LDAP Write Path
-
-LDAP writes are staged rather than done ad hoc:
-
-1. derive desired attributes
-2. diff against current entry state
-3. filter prohibited changes
-4. apply modify operations with bind-loss recovery
-
-Create-time-only email routing attributes are defined in [`app/constants.py`](../app/constants.py) and filtered out of update mutations in [`app/ldap/updates.py`](../app/ldap/updates.py).
-
-The identity anchor is `employeeID`:
-
-- provisioning uses it to determine whether a user already exists
-- updates use it as the primary AD lookup key
-- diagnostics uses it for worker correlation and ADP-vs-AD comparisons
+The sequence diagrams at the end of this document are the authoritative step-by-step runtime view.
 
 ## Source Of Truth And Attribute Ownership
 
+- ADP acquisition is centralized in [`app/adp/`](../app/adp): token retrieval uses client credentials plus mTLS, outbound calls use bounded retries, and worker parsing is shared across provisioning, updates, reports, and diagnostics.
+- Department mapping is centralized in [`app/department/resolver.py`](../app/department/resolver.py), which merges multiple ADP signals and applies canonical mapping, admin gating, manager-alignment guardrails, and fallback behavior.
+- LDAP writes follow one consistent model: derive desired attributes, diff against current state, filter blocked changes, then apply bounded modifications with reconnect and write-scope checks.
 - `employeeID` is the canonical join key across ADP and Active Directory. Provisioning, updates, diagnostics, and duplicate handling all converge on that field.
 - ADP is authoritative for upstream worker attributes consumed here, including employment status, hire and termination dates, business title, company, work location fields, department evidence, and manager employee identifier.
 - Active Directory is authoritative for directory object existence, distinguished names, current attribute state, and manager DN resolution used during diff and create flows.
@@ -392,27 +256,9 @@ Secret-backed file handling is centralized in [`app/security.py`](../app/securit
 
 ### Tests
 
-The test suite in [`tests/`](../tests) is organized by subsystem and covers:
+The test suite in [`tests/`](../tests) is organized by subsystem and covers config parsing, ADP retries, diagnostics modes, provisioning collision handling, update guardrails, department rules, secret materialization, and termed-report behavior.
 
-- config/env parsing
-- ADP retry behavior
-- diagnostics route modes
-- provisioning collision logic
-- update diff and denylist behavior
-- department resolution rules
-- secret materialization and cleanup
-- termination report selection and email orchestration
-
-There is also an opt-in live integration layer under [`tests/integration/`](../tests/integration):
-
-- ADP token and workers fetch smoke
-- LDAP bind and search smoke
-- SMTP send smoke for the termed report
-- Azure-hosted diagnostics contract smoke
-
-The live layer skips by default and only runs when the required environment variables are present. See [`docs/integration-tests.md`](./integration-tests.md).
-
-The live suite now includes a separately gated end-to-end update workflow smoke test with `dry_run=True`. That exercises the scheduled update path without enabling live write behavior.
+There is also an opt-in live layer under [`tests/integration/`](../tests/integration) for ADP, LDAP, SMTP, hosted diagnostics, and gated workflow smoke checks. It skips by default and runs only when the required environment variables are present. See [`docs/integration-tests.md`](./integration-tests.md).
 
 ### CI
 
@@ -428,35 +274,11 @@ Verification is defined in [`verify.yml`](../.github/workflows/verify.yml):
 
 Deployment is defined in [`main_adp-to-azuread.yml`](../.github/workflows/main_adp-to-azuread.yml).
 
-The workflow now builds a curated `release.zip` that contains only runtime payload:
+The workflow builds one curated `release.zip` containing only `function_app.py`, `host.json`, `requirements.txt`, and `app/**`, then deploys that artifact directly to the Function App.
 
-- `function_app.py`
-- `host.json`
-- `requirements.txt`
-- `app/**`
-
-That artifact is deployed directly to the Azure Function App `adp-to-azuread`.
-
-The current deployment target is Flex Consumption, so the workflow keeps `remote-build` enabled for correct Python build and function indexing behavior.
+The current deployment target is Flex Consumption, so the workflow keeps `remote-build` enabled and runs post-deploy function-index smoke checks.
 
 Manual publish remains possible via Azure Functions Core Tools, with publish hygiene supported by [`.funcignore`](../.funcignore).
-
-## Operational Characteristics
-
-- The architecture is stateless and polling-oriented.
-- Each timer run is independent and re-fetches external state.
-- ADP resilience is concentrated in bounded retry logic and worker dedupe.
-- LDAP resilience is concentrated in reconnect and bind-loss recovery.
-- `UPDATE_DRY_RUN` defaults to `true`, which makes update behavior safe by default.
-- Diagnostics is read-only and exposes only explicit supported views.
-- Fatal timer-path failures now raise exceptions instead of being treated as successful no-op invocations.
-
-Primary failure boundaries:
-
-- ADP auth failure
-- ADP workers fetch failure
-- LDAP connect/search/modify/add failure
-- SMTP send failure
 
 ## Idempotency And Concurrency
 
