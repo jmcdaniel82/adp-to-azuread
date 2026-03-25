@@ -20,7 +20,7 @@ from .ldap import (
     make_conn_factory,
     safe_unbind,
 )
-from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider
+from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider, build_telemetry_sink
 from .services.provisioning_service import ProvisioningOrchestrator
 
 _is_recent_hire = _provisioning_ops._is_recent_hire
@@ -64,6 +64,7 @@ def build_provisioning_orchestrator() -> ProvisioningOrchestrator:
         directory_gateway=build_directory_gateway(),
         provision_user=provision_user_in_ad,
         is_recent_hire=_is_recent_hire,
+        telemetry_sink=build_telemetry_sink(),
         settings_getter=get_provision_job_settings,
     )
 

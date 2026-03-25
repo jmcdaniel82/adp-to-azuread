@@ -1,0 +1,44 @@
+{
+  "workerID": {
+    "idValue": "EMP-CS-001"
+  },
+  "person": {
+    "preferredName": {
+      "givenName": "Casey",
+      "familyName1": "Service"
+    },
+    "legalName": {
+      "givenName": "Casey",
+      "familyName1": "Service"
+    }
+  },
+  "workAssignments": [
+    {
+      "jobTitle": "Customer Service Representative",
+      "assignedWorkLocations": [
+        {
+          "address": {
+            "countryCode": "US"
+          }
+        }
+      ],
+      "assignedOrganizationalUnits": [
+        {
+          "typeCode": {
+            "codeValue": "Department"
+          },
+          "nameCode": {
+            "shortName": "720670",
+            "codeValue": "720670",
+            "longName": "Customer Service - Salary"
+          }
+        }
+      ],
+      "homeOrganizationalUnits": [],
+      "occupationalClassifications": []
+    }
+  ],
+  "workerDates": {
+    "hireDate": "2026-02-15T00:00:00Z"
+  }
+}

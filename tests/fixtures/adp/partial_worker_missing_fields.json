@@ -1,0 +1,19 @@
+{
+  "workerID": {
+    "idValue": "EMP-PARTIAL-001"
+  },
+  "person": {},
+  "workAssignments": [
+    {
+      "assignedWorkLocations": [
+        {
+          "address": {}
+        }
+      ],
+      "assignedOrganizationalUnits": [],
+      "homeOrganizationalUnits": [],
+      "occupationalClassifications": []
+    }
+  ],
+  "workerDates": {}
+}

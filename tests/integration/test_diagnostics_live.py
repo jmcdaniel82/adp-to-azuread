@@ -4,7 +4,7 @@ Required env vars:
 - `DIAGNOSTICS_URL`
 
 Optional env vars:
-- `DIAGNOSTICS_BEARER_TOKEN`
+- `DIAGNOSTICS_FUNCTION_KEY`
 - `DIAGNOSTICS_VIEW` (defaults to `summary`)
 
 These tests call a live Azure-hosted endpoint and are skipped unless the URL
@@ -31,14 +31,15 @@ def test_live_diagnostics_endpoint_smoke():
         full_url = f"{url}?{urlencode({'view': view})}"
 
     headers = {}
-    bearer = env.get("DIAGNOSTICS_BEARER_TOKEN")
-    if bearer:
-        headers["Authorization"] = f"Bearer {bearer}"
+    function_key = env.get("DIAGNOSTICS_FUNCTION_KEY")
+    if function_key:
+        headers["x-functions-key"] = function_key
 
     response = requests.get(full_url, headers=headers, timeout=30)
-    assert response.status_code in {200, 401, 403}
-    if response.status_code == 200:
+    if function_key:
+        assert response.status_code == 200
         payload = response.json()
         assert isinstance(payload, dict)
         assert payload
-
+    else:
+        assert response.status_code in {401, 403}

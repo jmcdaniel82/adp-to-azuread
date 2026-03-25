@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import env_truthy
 from .department.resolver import resolve_local_ac_department
@@ -15,13 +15,14 @@ from .ldap import (
     log_cn_conflict_inventory,
     safe_unbind,
 )
-from .provisioning_create import create_user_with_retries, finalize_created_user_account
+from .provisioning_add import create_user_with_retries
 from .provisioning_directory import (
     find_existing_user_dn,
     resolve_manager_context,
     update_existing_user_manager,
 )
 from .provisioning_filters import is_recent_hire
+from .provisioning_finalize import ProvisioningIncompleteAccount, finalize_created_user_account
 from .provisioning_identity import (
     build_base_attributes,
     build_identifier_seeds,
@@ -42,6 +43,8 @@ def provision_user_in_ad(
     *,
     max_retry_attempts: int = 15,
     cn_collision_threshold: int = 5,
+    run_id: str | None = None,
+    report_incomplete_account: Callable[[ProvisioningIncompleteAccount], None] | None = None,
 ):
     """Create or reconcile one AD account for an ADP worker."""
     profile = build_provisioning_profile(user_data, summary_stats=summary_stats)
@@ -114,6 +117,7 @@ def provision_user_in_ad(
         safe_unbind=safe_unbind,
         format_ldap_error=format_ldap_error,
         is_bind_lost_result=is_bind_lost_result,
+        run_id=run_id,
     )
     conn = create_result.conn
     if not create_result.dn:
@@ -121,8 +125,12 @@ def provision_user_in_ad(
 
     inc_stat(summary_stats, "created")
     logging.info(f"User created: {create_result.dn} (hireDate={profile.hire_date})")
-    return finalize_created_user_account(
+    finalize_result = finalize_created_user_account(
         conn,
         create_result.dn,
+        employee_id=profile.emp_id,
         summary_stats=summary_stats,
     )
+    if finalize_result.incomplete_account and report_incomplete_account:
+        report_incomplete_account(finalize_result.incomplete_account)
+    return finalize_result.conn

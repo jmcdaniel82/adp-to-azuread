@@ -11,7 +11,8 @@ from ..adp import extract_employee_id, get_display_name, get_hire_date, get_lega
 from ..config import get_provision_job_settings
 from ..models import ProvisionJobSettings
 from ..reporting import inc_stat
-from ..services.interfaces import DirectoryGateway, WorkerProvider
+from ..services.interfaces import DirectoryGateway, TelemetrySink, WorkerProvider
+from ..telemetry import new_run_id
 
 
 class ProvisioningOrchestrator:
@@ -24,15 +25,18 @@ class ProvisioningOrchestrator:
         directory_gateway: DirectoryGateway,
         provision_user: Callable[..., object],
         is_recent_hire: Callable[[dict, datetime], bool],
+        telemetry_sink: TelemetrySink,
         settings_getter: Callable[[], ProvisionJobSettings] = get_provision_job_settings,
     ) -> None:
         self._worker_provider = worker_provider
         self._directory_gateway = directory_gateway
         self._provision_user = provision_user
         self._is_recent_hire = is_recent_hire
+        self._telemetry_sink = telemetry_sink
         self._settings_getter = settings_getter
 
     def run(self, mytimer) -> None:
+        run_id = new_run_id("scheduled_provision_new_hires")
         run_started_at = time.time()
         summary: dict[str, int] = {
             "adp_total": 0,
@@ -46,9 +50,13 @@ class ProvisioningOrchestrator:
             "skipped_missing_required_fields": 0,
             "add_failures": 0,
             "password_failures": 0,
+            "incomplete_accounts": 0,
+            "ldap_reconnects": 0,
             "duration_ms": 0,
         }
         settings = self._settings_getter()
+        fatal_reason = ""
+        incomplete_accounts: list[dict[str, str]] = []
 
         def log_summary(reason: str) -> None:
             summary["duration_ms"] = int((time.time() - run_started_at) * 1000)
@@ -56,7 +64,8 @@ class ProvisioningOrchestrator:
                 "[INFO] scheduled_provision_new_hires summary (%s) | "
                 "input: adp_total=%s deduped_dropped=%s hires_in_window=%s processed=%s | "
                 "outcomes: exists=%s created=%s manager_missing=%s skipped_country=%s "
-                "skipped_missing_required_fields=%s add_failures=%s password_failures=%s | duration_ms=%s",
+                "skipped_missing_required_fields=%s add_failures=%s password_failures=%s "
+                "incomplete_accounts=%s ldap_reconnects=%s | duration_ms=%s",
                 reason,
                 summary["adp_total"],
                 summary["deduped_dropped"],
@@ -69,16 +78,47 @@ class ProvisioningOrchestrator:
                 summary["skipped_missing_required_fields"],
                 summary["add_failures"],
                 summary["password_failures"],
+                summary["incomplete_accounts"],
+                summary["ldap_reconnects"],
                 summary["duration_ms"],
             )
+            self._telemetry_sink.emit(
+                "job_run",
+                {
+                    "job": "scheduled_provision_new_hires",
+                    "run_id": run_id,
+                    "dry_run": False,
+                    "worker_count": summary["hires_in_window"],
+                    "created": summary["created"],
+                    "changed": 0,
+                    "missing_in_ad": 0,
+                    "fatal_reason": fatal_reason,
+                    "status": reason,
+                    "duration_ms": summary["duration_ms"],
+                    "ldap_reconnects": summary["ldap_reconnects"],
+                    "incomplete_accounts": summary["incomplete_accounts"],
+                },
+                level="error" if fatal_reason else "info",
+            )
+            for record in incomplete_accounts:
+                self._telemetry_sink.emit(
+                    "provisioning_reconciliation",
+                    {
+                        "job": "scheduled_provision_new_hires",
+                        "run_id": run_id,
+                        **record,
+                    },
+                    level="warning",
+                )
 
-        logging.info("[INFO] scheduled_provision_new_hires triggered")
+        logging.info("[INFO] scheduled_provision_new_hires triggered (run_id=%s)", run_id)
         if mytimer and getattr(mytimer, "past_due", False):
             logging.warning("[WARN] Timer is past due")
 
         try:
             all_employees = self._worker_provider.fetch_workers(context="scheduled_provision_new_hires")
         except RuntimeError:
+            fatal_reason = "adp_fetch_failed"
             log_summary("adp_fetch_failed")
             raise
 
@@ -113,6 +153,7 @@ class ProvisioningOrchestrator:
                 require_create_base=True,
             )
         except RuntimeError:
+            fatal_reason = "ldap_open_failed"
             log_summary("ldap_open_failed")
             raise
 
@@ -142,10 +183,20 @@ class ProvisioningOrchestrator:
                         summary_stats=summary,
                         max_retry_attempts=settings.max_add_retries,
                         cn_collision_threshold=settings.cn_collision_threshold,
+                        run_id=run_id,
+                        report_incomplete_account=lambda record: incomplete_accounts.append(
+                            {
+                                "employee_id": record.employee_id,
+                                "dn": record.dn,
+                                "reconciliation_state": record.state,
+                                "error": record.error,
+                            }
+                        ),
                     )
                     if not new_conn:
                         completion_reason = "ldap_connection_unavailable"
                         inc_stat(summary, "add_failures")
+                        fatal_reason = "ldap_connection_unavailable"
                         fatal_error_message = (
                             "LDAP connection unavailable during scheduled_provision_new_hires."
                         )

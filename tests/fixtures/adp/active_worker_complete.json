@@ -1,0 +1,72 @@
+{
+  "workerID": {
+    "idValue": "EMP-FULL-001"
+  },
+  "person": {
+    "preferredName": {
+      "givenName": "Ada",
+      "familyName1": "Lovelace"
+    },
+    "legalName": {
+      "givenName": "Augusta",
+      "familyName1": "Lovelace"
+    }
+  },
+  "customFieldGroup": {
+    "stringFields": [
+      {
+        "nameCode": {
+          "codeValue": "Business Title"
+        },
+        "stringValue": "Senior Analyst"
+      }
+    ]
+  },
+  "meta": {
+    "lastUpdatedDateTime": "2026-03-15T12:30:00Z"
+  },
+  "workAssignments": [
+    {
+      "jobTitle": "Analyst",
+      "businessUnit": {
+        "name": "CFS Brands"
+      },
+      "assignedWorkLocations": [
+        {
+          "address": {
+            "countryCode": "US",
+            "cityName": "Atlanta",
+            "postalCode": "30301",
+            "lineOne": "1 Test Way",
+            "countrySubdivisionLevel1": {
+              "codeValue": "GA"
+            }
+          }
+        }
+      ],
+      "assignedOrganizationalUnits": [
+        {
+          "typeCode": {
+            "codeValue": "Department"
+          },
+          "nameCode": {
+            "shortName": "Finance"
+          }
+        }
+      ],
+      "homeOrganizationalUnits": [],
+      "occupationalClassifications": [],
+      "reportsTo": [
+        {
+          "workerID": {
+            "idValue": "MGR-001"
+          }
+        }
+      ],
+      "hireDate": "2026-02-01T00:00:00Z"
+    }
+  ],
+  "workerDates": {
+    "hireDate": "2026-02-01T00:00:00Z"
+  }
+}

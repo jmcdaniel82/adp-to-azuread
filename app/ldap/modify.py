@@ -7,6 +7,7 @@ from typing import Optional
 
 from ldap3 import Connection
 
+from ..telemetry import StructuredLogTelemetrySink
 from .connection import format_ldap_error, is_bind_lost_result, safe_unbind
 from .planning import filter_blocked_update_changes
 
@@ -25,6 +26,17 @@ def apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) ->
             try:
                 safe_unbind(conn, f"modify exception for {dn}")
                 conn = conn_factory()
+                StructuredLogTelemetrySink().emit(
+                    "directory_reconnect",
+                    {
+                        "job": "scheduled_update_existing_users",
+                        "run_id": "",
+                        "employee_id": "",
+                        "dn": dn,
+                        "reason": "modify_exception",
+                    },
+                    level="warning",
+                )
                 if conn.modify(dn, filtered_changes):
                     return conn
             except Exception as reconnect_error:
@@ -44,6 +56,17 @@ def apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) ->
             try:
                 safe_unbind(conn, f"modify bind-loss for {dn}")
                 conn = conn_factory()
+                StructuredLogTelemetrySink().emit(
+                    "directory_reconnect",
+                    {
+                        "job": "scheduled_update_existing_users",
+                        "run_id": "",
+                        "employee_id": "",
+                        "dn": dn,
+                        "reason": "modify_bind_loss",
+                    },
+                    level="warning",
+                )
                 if conn.modify(dn, filtered_changes):
                     return conn
             except Exception as exc:

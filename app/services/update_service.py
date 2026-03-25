@@ -9,7 +9,8 @@ from ..adp import extract_employee_id
 from ..config import get_update_job_settings
 from ..constants import AD_UPDATE_SEARCH_ATTRIBUTES
 from ..models import UpdateJobSettings
-from ..services.interfaces import DirectoryGateway, WorkerProvider
+from ..services.interfaces import DirectoryGateway, TelemetrySink, WorkerProvider
+from ..telemetry import new_run_id
 
 
 class UpdateOrchestrator:
@@ -26,6 +27,7 @@ class UpdateOrchestrator:
         diff_update_attributes: Callable[..., dict],
         entry_attr_value: Callable[..., object],
         is_bind_lost_result: Callable[[dict], bool],
+        telemetry_sink: TelemetrySink,
         settings_getter: Callable[[], UpdateJobSettings] = get_update_job_settings,
     ) -> None:
         self._worker_provider = worker_provider
@@ -36,17 +38,41 @@ class UpdateOrchestrator:
         self._diff_update_attributes = diff_update_attributes
         self._entry_attr_value = entry_attr_value
         self._is_bind_lost_result = is_bind_lost_result
+        self._telemetry_sink = telemetry_sink
         self._settings_getter = settings_getter
 
     def run(self, mytimer) -> None:
         del mytimer
+        run_id = new_run_id("scheduled_update_existing_users")
         settings = self._settings_getter()
         logging.info(
             f"[INFO] scheduled_update_existing_users triggered "
-            f"(dry_run={settings.dry_run}, lookback_days={settings.lookback_days})"
+            f"(run_id={run_id}, dry_run={settings.dry_run}, lookback_days={settings.lookback_days})"
         )
 
-        all_employees = self._worker_provider.fetch_workers(context="scheduled_update_existing_users")
+        fatal_reason = ""
+        try:
+            all_employees = self._worker_provider.fetch_workers(context="scheduled_update_existing_users")
+        except RuntimeError:
+            fatal_reason = "adp_fetch_failed"
+            self._telemetry_sink.emit(
+                "job_run",
+                {
+                    "job": "scheduled_update_existing_users",
+                    "run_id": run_id,
+                    "dry_run": settings.dry_run,
+                    "worker_count": 0,
+                    "created": 0,
+                    "changed": 0,
+                    "missing_in_ad": 0,
+                    "fatal_reason": fatal_reason,
+                    "status": "adp_fetch_failed",
+                    "ldap_reconnects": 0,
+                    "total_changes": 0,
+                },
+                level="error",
+            )
+            raise
         candidates, candidate_stats = self._select_update_candidates(
             all_employees,
             settings,
@@ -71,16 +97,54 @@ class UpdateOrchestrator:
 
         if not candidates:
             logging.info("[INFO] Nothing to update; exiting scheduled_update_existing_users")
+            self._telemetry_sink.emit(
+                "job_run",
+                {
+                    "job": "scheduled_update_existing_users",
+                    "run_id": run_id,
+                    "dry_run": settings.dry_run,
+                    "worker_count": 0,
+                    "created": 0,
+                    "changed": 0,
+                    "missing_in_ad": 0,
+                    "fatal_reason": "",
+                    "status": "no_candidates",
+                    "ldap_reconnects": 0,
+                    "total_changes": 0,
+                },
+            )
             return
 
-        directory = self._directory_gateway.open_directory(
-            context="Update",
-            require_create_base=False,
-        )
+        try:
+            directory = self._directory_gateway.open_directory(
+                context="Update",
+                require_create_base=False,
+            )
+        except RuntimeError:
+            fatal_reason = "ldap_open_failed"
+            self._telemetry_sink.emit(
+                "job_run",
+                {
+                    "job": "scheduled_update_existing_users",
+                    "run_id": run_id,
+                    "dry_run": settings.dry_run,
+                    "worker_count": len(candidates),
+                    "created": 0,
+                    "changed": 0,
+                    "missing_in_ad": 0,
+                    "fatal_reason": fatal_reason,
+                    "status": "ldap_open_failed",
+                    "ldap_reconnects": 0,
+                    "total_changes": 0,
+                },
+                level="error",
+            )
+            raise
         logging.info("[INFO] LDAP connection opened for update")
         updated_users = 0
         total_changes = 0
         missing_in_ad = 0
+        ldap_reconnects = 0
         fatal_error_message: str | None = None
         try:
             for emp in candidates:
@@ -105,10 +169,22 @@ class UpdateOrchestrator:
                             context="Update",
                             require_create_base=False,
                         )
+                        ldap_reconnects += 1
+                        self._telemetry_sink.emit(
+                            "directory_reconnect",
+                            {
+                                "job": "scheduled_update_existing_users",
+                                "run_id": run_id,
+                                "employee_id": emp_id,
+                                "reason": "search_exception",
+                            },
+                            level="warning",
+                        )
                     except Exception as reconnect_error:
                         logging.error(
                             f"Reconnect failed after search exception for {emp_id}: {reconnect_error}"
                         )
+                        fatal_reason = "search_reconnect_failed"
                         fatal_error_message = (
                             "LDAP reconnection failed during scheduled_update_existing_users "
                             f"search recovery for {emp_id}."
@@ -126,10 +202,22 @@ class UpdateOrchestrator:
                             context="Update",
                             require_create_base=False,
                         )
+                        ldap_reconnects += 1
+                        self._telemetry_sink.emit(
+                            "directory_reconnect",
+                            {
+                                "job": "scheduled_update_existing_users",
+                                "run_id": run_id,
+                                "employee_id": emp_id,
+                                "reason": "search_bind_loss",
+                            },
+                            level="warning",
+                        )
                     except Exception as reconnect_error:
                         logging.error(
                             f"Reconnect failed after bind-loss search for {emp_id}: {reconnect_error}"
                         )
+                        fatal_reason = "bind_loss_reconnect_failed"
                         fatal_error_message = (
                             "LDAP reconnection failed during scheduled_update_existing_users "
                             f"bind-loss recovery for {emp_id}."
@@ -178,6 +266,7 @@ class UpdateOrchestrator:
                     updated_directory = self._directory_gateway.apply_changes(directory, dn, changes)
                     if not updated_directory:
                         logging.error("LDAP connection unavailable; aborting scheduled_update_existing_users")
+                        fatal_reason = "ldap_connection_unavailable"
                         fatal_error_message = (
                             "LDAP connection unavailable during scheduled_update_existing_users."
                         )
@@ -192,6 +281,23 @@ class UpdateOrchestrator:
                 f"[INFO] LDAP connection closed - scheduled_update_existing_users complete "
                 f"(users_with_changes={updated_users}, total_changes={total_changes}, "
                 f"missing_in_ad={missing_in_ad})"
+            )
+            self._telemetry_sink.emit(
+                "job_run",
+                {
+                    "job": "scheduled_update_existing_users",
+                    "run_id": run_id,
+                    "dry_run": settings.dry_run,
+                    "worker_count": len(candidates),
+                    "created": 0,
+                    "changed": updated_users,
+                    "missing_in_ad": missing_in_ad,
+                    "fatal_reason": fatal_reason,
+                    "status": fatal_reason or "completed",
+                    "ldap_reconnects": ldap_reconnects,
+                    "total_changes": total_changes,
+                },
+                level="error" if fatal_reason else "info",
             )
 
         if fatal_error_message:

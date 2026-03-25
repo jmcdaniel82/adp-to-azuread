@@ -1,0 +1,92 @@
+[
+  {
+    "workerID": {
+      "idValue": "EMP-DUP-001"
+    },
+    "person": {
+      "preferredName": {
+        "givenName": "Dupe",
+        "familyName1": "Worker"
+      },
+      "legalName": {
+        "givenName": "Dupe",
+        "familyName1": "Worker"
+      }
+    },
+    "meta": {
+      "lastUpdatedDateTime": "2026-03-10T09:00:00Z"
+    },
+    "customFieldGroup": {
+      "stringFields": [
+        {
+          "nameCode": {
+            "codeValue": "Business Title"
+          },
+          "stringValue": "Old Title"
+        }
+      ]
+    },
+    "workAssignments": [
+      {
+        "assignedWorkLocations": [
+          {
+            "address": {
+              "countryCode": "US"
+            }
+          }
+        ],
+        "assignedOrganizationalUnits": [],
+        "homeOrganizationalUnits": [],
+        "occupationalClassifications": []
+      }
+    ],
+    "workerDates": {
+      "hireDate": "2026-01-01T00:00:00Z"
+    }
+  },
+  {
+    "workerID": {
+      "idValue": "EMP-DUP-001"
+    },
+    "person": {
+      "preferredName": {
+        "givenName": "Dupe",
+        "familyName1": "Worker"
+      },
+      "legalName": {
+        "givenName": "Dupe",
+        "familyName1": "Worker"
+      }
+    },
+    "meta": {
+      "lastUpdatedDateTime": "2026-03-15T09:00:00Z"
+    },
+    "customFieldGroup": {
+      "stringFields": [
+        {
+          "nameCode": {
+            "codeValue": "Business Title"
+          },
+          "stringValue": "New Title"
+        }
+      ]
+    },
+    "workAssignments": [
+      {
+        "assignedWorkLocations": [
+          {
+            "address": {
+              "countryCode": "US"
+            }
+          }
+        ],
+        "assignedOrganizationalUnits": [],
+        "homeOrganizationalUnits": [],
+        "occupationalClassifications": []
+      }
+    ],
+    "workerDates": {
+      "hireDate": "2026-01-01T00:00:00Z"
+    }
+  }
+]

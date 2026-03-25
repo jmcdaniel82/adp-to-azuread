@@ -9,7 +9,7 @@ The application has three timer jobs and one HTTP diagnostics route:
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
 - `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
 - `scheduled_last_30_day_termed_report` emails a weekly ADP-only CSV of workers terminated in the last 30 days.
-- `GET /api/diagnostics` serves explicit diagnostics views:
+- `GET /api/diagnostics` serves explicit diagnostics views behind Azure Functions function-key auth:
   - `view=summary`
   - `view=department-diff`
   - `view=worker&employeeId=...`
@@ -74,7 +74,7 @@ function_app.py             # host shim importing app from app.function_app
 
 Azure Functions Python v2 discovery still happens from the repository root through `function_app.py`, while the decorated handlers and service orchestration live under `app/`.
 
-For the full architecture walkthrough and runtime sequence diagrams, see [docs/architecture.md](docs/architecture.md).
+For the full architecture walkthrough, top-level architecture maps, and runtime sequence diagrams, see [docs/architecture.md](docs/architecture.md).
 
 ## Behavioral Invariants Preserved
 
@@ -208,6 +208,8 @@ The deployment workflow now builds a curated `release.zip` containing only the r
 - `app/**`
 
 That package is deployed to the Azure Function App `adp-to-azuread` after verification passes.
+
+The current deployment target is Azure Functions Flex Consumption, so the workflow keeps remote build enabled to preserve correct Python dependency build and function indexing behavior.
 
 Manual publish remains:
 

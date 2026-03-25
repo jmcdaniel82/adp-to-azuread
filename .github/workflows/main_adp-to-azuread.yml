@@ -12,6 +12,8 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: 'release.zip'
+  AZURE_FUNCTIONAPP_PRODUCTION_NAME: 'adp-to-azuread'
+  AZURE_FUNCTIONAPP_STAGING_NAME: ${{ vars.AZURE_FUNCTIONAPP_STAGING_NAME }}
   PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
@@ -97,6 +99,11 @@ jobs:
         with:
           name: python-app
 
+      - name: Setup Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -104,12 +111,33 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D194AF7E0D4F4DF6A47E424D514F5B55 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_B667FEA9683841769EBD122F8698FE3F }}
 
-      - name: 'Deploy to Azure Functions'
+      - name: Deploy to staging Azure Functions
+        if: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME != '' }}
         uses: Azure/functions-action@v1
-        id: deploy-to-function
+        id: deploy-to-staging
         with:
-          app-name: 'adp-to-azuread'
+          app-name: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME }}
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           remote-build: true
+
+      - name: Smoke check staging function indexing
+        if: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME != '' }}
+        env:
+          FUNCTIONAPP_NAME: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME }}
+        run: python scripts/assert_function_indexing.py
+
+      - name: Deploy to production Azure Functions
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_PRODUCTION_NAME }}
+          slot-name: 'Production'
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          remote-build: true
+
+      - name: Smoke check production function indexing
+        env:
+          FUNCTIONAPP_NAME: ${{ env.AZURE_FUNCTIONAPP_PRODUCTION_NAME }}
+        run: python scripts/assert_function_indexing.py
           

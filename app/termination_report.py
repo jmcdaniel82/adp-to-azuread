@@ -30,7 +30,7 @@ from .adp import (
     parse_datetime,
 )
 from .config import get_termed_report_settings
-from .services.defaults import DefaultMailGateway, DefaultWorkerProvider
+from .services.defaults import DefaultMailGateway, DefaultWorkerProvider, build_telemetry_sink
 from .services.termed_report_service import TermedReportOrchestrator
 
 TERMED_REPORT_FIELDNAMES = [
@@ -226,5 +226,6 @@ def build_termed_report_orchestrator() -> TermedReportOrchestrator:
         build_termed_report_rows=build_termed_report_rows,
         render_termed_report_csv=render_termed_report_csv,
         now_getter=lambda: datetime.now(timezone.utc),
+        telemetry_sink=build_telemetry_sink(),
         settings_getter=get_termed_report_settings,
     )

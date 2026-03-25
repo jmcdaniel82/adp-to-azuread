@@ -12,6 +12,9 @@ try:
     import azure.functions as _func
 except ModuleNotFoundError:
 
+    class _DummyAuthLevel:
+        FUNCTION = "function"
+
     class _DummyDecoratorApp:
         def function_name(self, *args, **kwargs):
             def _decorator(fn):
@@ -38,6 +41,7 @@ except ModuleNotFoundError:
             self.mimetype = mimetype
 
     class _DummyModule:
+        AuthLevel = _DummyAuthLevel
         FunctionApp = _DummyDecoratorApp
         HttpRequest = object
         HttpResponse = _DummyHttpResponse

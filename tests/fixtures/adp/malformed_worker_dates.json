@@ -1,0 +1,37 @@
+{
+  "workerID": {
+    "idValue": "EMP-MALFORMED-001"
+  },
+  "person": {
+    "preferredName": {
+      "givenName": "Broken",
+      "familyName1": "Dates"
+    },
+    "legalName": {
+      "givenName": "Broken",
+      "familyName1": "Dates"
+    }
+  },
+  "meta": {
+    "lastUpdatedDateTime": "not-a-date"
+  },
+  "workAssignments": [
+    {
+      "assignedWorkLocations": [
+        {
+          "address": {
+            "countryCode": "US"
+          }
+        }
+      ],
+      "assignedOrganizationalUnits": [],
+      "homeOrganizationalUnits": [],
+      "occupationalClassifications": [],
+      "hireDate": "13/45/2026"
+    }
+  ],
+  "workerDates": {
+    "hireDate": "bad-hire-date",
+    "terminationDate": "bad-term-date"
+  }
+}

@@ -7,6 +7,7 @@ import ssl
 from typing import Any, Callable, Optional
 
 from ..models import LdapSettings
+from ..telemetry import StructuredLogTelemetrySink
 from .interfaces import DirectoryContext, DirectoryGateway, DirectoryLookup, MailGateway, WorkerProvider
 
 
@@ -162,3 +163,8 @@ class DefaultMailGateway(MailGateway):
             csv_content=csv_content,
             row_count=row_count,
         )
+
+
+def build_telemetry_sink() -> StructuredLogTelemetrySink:
+    """Build the default structured-log telemetry sink."""
+    return StructuredLogTelemetrySink()

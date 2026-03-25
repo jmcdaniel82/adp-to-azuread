@@ -64,6 +64,11 @@ class DummyConnRetryOnce(DummyConn):
         return True
 
 
+class DummyConnPasswordFail(DummyConn):
+    def modify_password(self, dn, pwd):
+        raise RuntimeError("password failed")
+
+
 def _make_emp(employee_id="EMP12345", first="Jane", last="Doe"):
     return {
         "person": {
@@ -174,3 +179,23 @@ def test_scheduled_provision_raises_when_token_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ADP token"):
         provisioning.run_scheduled_provision_new_hires(None)
+
+
+def test_password_failure_marks_incomplete_account_summary():
+    conn = DummyConnPasswordFail()
+    emp = _make_emp(employee_id="EMPINCOMPLETE", first="Partial", last="Create")
+    summary = {"password_failures": 0, "incomplete_accounts": 0}
+
+    result_conn = provision_user_in_ad(
+        emp,
+        conn,
+        "DC=example,DC=com",
+        "OU=Users,DC=example,DC=com",
+        summary_stats=summary,
+        max_retry_attempts=3,
+        cn_collision_threshold=2,
+    )
+
+    assert result_conn is conn
+    assert summary["password_failures"] == 1
+    assert summary["incomplete_accounts"] == 1

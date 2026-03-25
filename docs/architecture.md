@@ -9,7 +9,7 @@ The app exposes four runtime entrypoints:
 - `scheduled_provision_new_hires`: provisions recent hires into AD
 - `scheduled_update_existing_users`: compares ADP records to existing AD users and applies attribute updates
 - `scheduled_last_30_day_termed_report`: emails a weekly CSV of recent ADP terminations
-- `GET /api/diagnostics`: serves controlled diagnostics views for summary, department diffs, worker lookup, and recent hires
+- `GET /api/diagnostics`: serves controlled, read-only diagnostics views for summary, department diffs, worker lookup, and recent hires
 
 External integrations:
 
@@ -26,7 +26,7 @@ Azure Functions discovers the root `FunctionApp` from the repo-level shim in [`f
 
 Runtime host configuration is minimal and standard in [`host.json`](../host.json):
 
-- Functions host version `2.0`
+- `host.json` schema version `2.0`, which is the standard host format for Azure Functions runtime 2.x and later
 - Application Insights sampling
 - Extension bundle `Microsoft.Azure.Functions.ExtensionBundle`
 
@@ -37,7 +37,105 @@ Current schedules:
 - provisioning every 15 minutes, `run_on_startup=False`
 - update hourly
 - termed report on `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1`
-- diagnostics exposed as `GET /api/diagnostics`
+- diagnostics exposed as `GET /api/diagnostics` with Azure Functions function-key auth
+
+## Architecture Decisions
+
+- The sync is stateless and polling-oriented. There is no application database, queue, or persisted cursor.
+- ADP is the source of truth for worker lifecycle state and upstream HR attributes consumed by this app. Active Directory is the managed projection target.
+- `employeeID` is the canonical cross-system identity key.
+- Azure-specific trigger and route concerns stop at the decorated entrypoints. Workflow sequencing lives in service orchestrators, and transport logic lives in focused ADP and LDAP packages.
+- Update behavior is safe by default because `UPDATE_DRY_RUN=true` unless an environment explicitly disables it.
+- Diagnostics is intentionally read-only and bounded to explicit query modes rather than acting as a general-purpose worker or directory browser.
+- Some historical names still include `azuread`, but the runtime target described in this repository is on-prem Active Directory over LDAPS rather than Entra ID.
+
+## Quick Reference
+
+| Entrypoint | Trigger | Default schedule or auth | Reads from | Writes to | Primary output |
+| --- | --- | --- | --- | --- | --- |
+| `scheduled_provision_new_hires` | Timer | every 15 minutes | ADP, LDAP | LDAP | new AD users, manager links, enabled accounts |
+| `scheduled_update_existing_users` | Timer | hourly, `UPDATE_DRY_RUN=true` by default | ADP, LDAP | LDAP when dry run is disabled | logged attribute diffs or applied attribute changes |
+| `scheduled_last_30_day_termed_report` | Timer | `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1` | ADP | SMTP | emailed CSV report |
+| `GET /api/diagnostics` | HTTP GET | function-key auth | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
+
+## Key Invariants
+
+- `employeeID` is the canonical join key across ADP and Active Directory.
+- Diagnostics code paths are read-only and do not call LDAP write helpers.
+- Update sync never mutates create-time-only routing identifiers such as `mail`, `userPrincipalName`, `mailNickname`, `proxyAddresses`, or `targetAddress`.
+- Timer runs recompute desired state from external systems instead of relying on local persisted state.
+- Fatal orchestration failures are surfaced as failed Azure Functions invocations rather than being treated as successful no-op runs.
+
+## Architecture Map
+
+### System Context Map
+
+```mermaid
+flowchart LR
+    subgraph Azure["Azure Function App"]
+        Host["Azure Functions Host"]
+        Triggers["Timer Triggers + Diagnostics Route"]
+        Wrappers["Workflow Wrappers\napp/provisioning.py\napp/updates.py\napp/termination_report.py\napp/diagnostics_routes.py"]
+        Services["Service Layer\napp/services/*"]
+        Domain["Domain Helpers\napp/department/*\napp/diagnostics/*\nprovisioning_* helpers"]
+        Integrations["Integration and Transport Layer\napp/adp/*\napp/ldap/*\napp/security.py\nmail gateway adapter"]
+
+        Host --> Triggers --> Wrappers --> Services
+        Services --> Domain
+        Services --> Integrations
+    end
+
+    ADP["ADP OAuth + Workers API"]
+    AD["Active Directory over LDAPS"]
+    SMTP["SMTP"]
+    Insights["Application Insights"]
+
+    Integrations --> ADP
+    Integrations --> AD
+    Integrations --> SMTP
+    Host --> Insights
+```
+
+This map is the highest-level runtime view: Azure Functions receives timer or HTTP events, wrapper modules hand off immediately to service orchestration, and the service layer coordinates domain rules plus ADP, LDAP, and SMTP transport boundaries.
+
+### Code Layer Map
+
+```mermaid
+flowchart TB
+    Root["function_app.py\nroot discovery shim"]
+    Entry["app/function_app.py\nAzure decorators only"]
+    Wrappers["Workflow Wrappers\nprovisioning.py\nupdates.py\ntermination_report.py\ndiagnostics_routes.py"]
+    Services["Service Orchestrators\napp/services/provisioning_service.py\napp/services/update_service.py\napp/services/termed_report_service.py\napp/services/diagnostics_service.py"]
+    Helpers["Domain and Workflow Helpers\napp/department/*\napp/diagnostics/*\napp/provisioning_*"]
+    Adapters["Gateway Adapters\napp/services/defaults.py"]
+    ADP["ADP Package\napp/adp/*"]
+    LDAP["LDAP Package\napp/ldap/*"]
+    Core["Shared Core\napp/config.py\napp/models.py\napp/constants.py\napp/reporting.py\napp/security.py"]
+    Facades["Compatibility Facades\napp/adp_client.py\napp/ldap_client.py\napp/department_resolution.py"]
+
+    Root --> Entry --> Wrappers --> Services
+    Wrappers --> Core
+    Services --> Helpers
+    Services --> Adapters
+    Services --> Core
+    Adapters --> ADP
+    Adapters --> LDAP
+    Facades -. legacy imports .-> ADP
+    Facades -. legacy imports .-> LDAP
+    Facades -. legacy imports .-> Helpers
+```
+
+The key boundary is `wrappers -> services -> adapters/packages`. The wrappers stay Azure-specific, the services own workflow sequencing, and the adapter plus package layers own transport details and normalization logic.
+
+## Runtime Topology
+
+- The repository deploys one Azure Function App target, `adp-to-azuread`, and the runtime surface is limited to three timer triggers plus one HTTP diagnostics route.
+- The current deployment target is Azure Functions Flex Consumption. The deployment workflow uses remote build so Python dependencies are built during deployment and function indexing remains intact in Azure.
+- Outbound dependencies are ADP HTTPS with mTLS client certificate material, LDAPS to on-prem Active Directory, SMTP for report delivery, and Azure-native logging/telemetry via the Functions host and Application Insights.
+- The repository does not declare or provision network topology. Reachability to on-prem AD, private DNS, firewall rules, and any hybrid/VNet connectivity are environment-owned prerequisites.
+- There is no application-side durable storage. The only durable state lives in ADP, Active Directory, SMTP mailboxes, and Azure platform telemetry.
+- Certificate and key material are supplied as environment values and materialized to temp files on demand for the worker process lifetime through [`app/security.py`](../app/security.py).
+- The diagnostics route is the only inbound HTTP surface exposed by application code.
 
 ## Module Layout
 
@@ -51,6 +149,7 @@ Current schedules:
 - [`app/config.py`](../app/config.py): environment parsing, defaults, and validation
 - [`app/models.py`](../app/models.py): typed settings and diagnostics/domain result models
 - [`app/constants.py`](../app/constants.py): LDAP attribute names, ADP HTTP defaults, update denylist, and search attribute lists
+- [`app/reporting.py`](../app/reporting.py): cross-cutting summary-counter helper used by provisioning and other orchestration paths
 
 ### Security And Secret Materialization
 
@@ -194,7 +293,7 @@ Handler path:
 
 Flow summary:
 
-1. HTTP GET arrives at `/api/diagnostics`.
+1. HTTP GET arrives at `/api/diagnostics` under the shared Function-level auth boundary.
 2. Query parameter `view` selects the diagnostics mode.
 3. `summary` and `department-diff` fetch ADP and LDAP data in parallel.
 4. `worker` and `recent-hires` fetch ADP only.
@@ -246,6 +345,16 @@ The identity anchor is `employeeID`:
 - updates use it as the primary AD lookup key
 - diagnostics uses it for worker correlation and ADP-vs-AD comparisons
 
+## Source Of Truth And Attribute Ownership
+
+- `employeeID` is the canonical join key across ADP and Active Directory. Provisioning, updates, diagnostics, and duplicate handling all converge on that field.
+- ADP is authoritative for upstream worker attributes consumed here, including employment status, hire and termination dates, business title, company, work location fields, department evidence, and manager employee identifier.
+- Active Directory is authoritative for directory object existence, distinguished names, current attribute state, and manager DN resolution used during diff and create flows.
+- CN, `sAMAccountName`, `userPrincipalName`, and mail-routing identifiers are derived secondary identifiers used during provisioning rather than primary join keys.
+- Update sync intentionally manages only the bounded attribute set planned in [`app/ldap/planning.py`](../app/ldap/planning.py) and searched via `AD_UPDATE_SEARCH_ATTRIBUTES` in [`app/constants.py`](../app/constants.py). Attributes outside that planned set are out of scope.
+- Create-time-only routing identifiers such as `mail`, `userPrincipalName`, `mailNickname`, `proxyAddresses`, and `targetAddress` are intentionally excluded from update mutations.
+- Diagnostics surfaces compact operational projections, not the full ADP payload and not a general-purpose AD browser.
+
 ## Config And Secrets
 
 The configuration model is fully environment-driven.
@@ -260,6 +369,15 @@ Secret-backed file handling is centralized in [`app/security.py`](../app/securit
 - LDAP and ADP CA bundles resolve explicitly, with `certifi` fallback
 - temp cert files are tracked and cleaned deterministically
 - secret payload content is not logged
+
+## Security Model
+
+- The diagnostics route is explicitly configured with Azure Functions function-key auth in [`app/function_app.py`](../app/function_app.py). Requests must include a valid function key or host key unless stronger platform authentication is added outside this repository. All supported diagnostics views currently share that same auth boundary; there is no per-view authorization layer in this repository.
+- Diagnostics is read-only, but `view=worker` can return employee identifiers, names, titles, company, department, hire date, and termination date. Treat the route as an operational PII surface rather than a public health check.
+- The application code reads secrets only from environment variables. Repository guidance expects deployed secrets to come from Azure App Settings or Key Vault-backed settings, while local development uses the untracked `local.settings.json`.
+- LDAP write scope is bounded operationally by the bind account permissions plus the configured `LDAP_SEARCH_BASE` and `LDAP_CREATE_BASE`. The repository does not independently enforce a richer OU or attribute-level authorization model.
+- Update-path guardrails explicitly block mutation of create-time-only mail-routing identifiers. Diagnostics code paths never call LDAP write helpers.
+- Secret contents are not logged, but operational logs can contain employee identifiers, distinguished names, department decisions, and dry-run/live update deltas for troubleshooting.
 
 ## Tests, CI, And Deployment
 
@@ -310,6 +428,8 @@ The workflow now builds a curated `release.zip` that contains only runtime paylo
 
 That artifact is deployed directly to the Azure Function App `adp-to-azuread`.
 
+The current deployment target is Flex Consumption, so the workflow keeps `remote-build` enabled for correct Python build and function indexing behavior.
+
 Manual publish remains possible via Azure Functions Core Tools, with publish hygiene supported by [`.funcignore`](../.funcignore).
 
 ## Operational Characteristics
@@ -328,6 +448,57 @@ Primary failure boundaries:
 - ADP workers fetch failure
 - LDAP connect/search/modify/add failure
 - SMTP send failure
+
+## Idempotency And Concurrency
+
+- There is no application-level distributed lock, lease table, or persisted cursor. Each invocation recomputes desired state from live ADP and Active Directory data.
+- ADP workers are deduped by `employeeID` before downstream workflow decisions, and suspicious duplicate profiles are logged for operator review.
+- Provisioning is rerunnable in the sense that it first searches AD by `employeeID` and uses deterministic identifier generation plus collision handling. Repeated runs should not create duplicate accounts for the same `employeeID`.
+- Update sync is convergent. It computes desired attributes, diffs against current AD state, and no-ops when values already match. In dry-run mode it logs the same planned changes without writing them.
+- The weekly termed report is rerunnable but not idempotent at the mail-transport layer. Repeated successful invocations can resend overlapping CSV content for the same rolling lookback window.
+- The repository delegates timer overlap coordination to the Azure Functions runtime. No additional in-repo singleton or overlap suppression mechanism is implemented.
+- Partial provisioning is possible. If an AD object is created but password set or account enablement fails later in the flow, a future run will treat that object as existing rather than recreating it.
+
+## Failure Handling And Observability
+
+- ADP token/fetch failures and LDAP open failures fail the entire timer invocation.
+- Provisioning logs and counts worker-level exceptions, continues to the next worker when possible, and raises only when the orchestrator loses a usable LDAP session.
+- Update search exceptions attempt reconnect-and-continue recovery. Workers missing from AD are skipped. Individual LDAP modify failures are logged in the transport layer and can leave the batch running unless the directory session becomes unavailable to the orchestrator.
+- SMTP failure fails the weekly termed-report invocation. There is no built-in resend queue or dead-letter mechanism in this repository.
+- Application Insights receives Functions host logs, but the repository does not currently emit custom metrics, correlation IDs, or a separate run-history store.
+- Operational visibility is primarily log-based: provisioning emits explicit run-summary counters, update logs dry-run/live per-attribute deltas, and the termed report logs row-count plus cutoff metadata.
+- Diagnostics complements logs with bounded read-only inspection. It is intended for targeted operator queries, not for write remediation or bulk export.
+
+## Scale And Operating Assumptions
+
+- Each scheduled run fetches the full ADP worker set needed for that workflow and keeps the relevant working set in process memory.
+- Runtime duration and memory use therefore scale roughly with worker population size and payload size rather than with incremental event volume.
+- LDAP lookup and write operations are primarily sequential per candidate or hire. The main concurrency in this repository is the diagnostics service fetching ADP and LDAP sources in parallel for summary-style views.
+- The current design is intended for scheduled synchronization and targeted operator diagnostics, not for bulk export APIs or high-frequency near-real-time change processing.
+- Diagnostics `summary` and `department-diff` views read a broad AD employeeID map, while `worker` and `recent-hires` are narrower ADP-only views.
+
+## Operator Runbook
+
+- ADP auth or fetch failure:
+  inspect the failed invocation logs first; validate token endpoint reachability, client credentials, and client certificate material.
+- LDAP bind or connect failure:
+  validate `LDAP_SERVER`, credentials, CA bundle path, and environment-level network reachability to on-prem AD.
+- Partial provisioning after object create:
+  check for an existing AD object by `employeeID`; reruns will reconcile against the existing object rather than recreate it.
+- Duplicate `employeeID` or duplicate-profile warnings:
+  inspect ADP source data and recent worker changes; the workflow logs and dedupes but does not auto-resolve upstream data quality issues.
+- SMTP failure:
+  treat the weekly report as unsent until a later successful run or a manual resend; the repository has no built-in resend queue.
+- Dry-run versus live update verification:
+  confirm `UPDATE_DRY_RUN` in the environment and use update logs plus diagnostics views to verify whether a run only planned changes or actually applied them.
+
+## Time Semantics
+
+- Job code normalizes parsed ADP datetimes to UTC when offsets are absent or when timestamps end with `Z`.
+- Hire lookback, update lookback, and termed-report lookback calculations use `datetime.now(timezone.utc)` inside the workflow code.
+- The termed report renders CSV timestamps in UTC ISO-8601 format.
+- The repository does not set a host timezone override in code. Cron interpretation therefore depends on the Azure Functions host configuration for the deployed app.
+- The weekly termed report is a rolling `TERMED_REPORT_LOOKBACK_DAYS` window rather than a calendar-week report.
 
 ## Design Strengths
 
@@ -367,6 +538,23 @@ Primary failure boundaries:
   - add route branching in [`app/diagnostics_routes.py`](../app/diagnostics_routes.py)
 - To add more report sinks:
   - extend the selection -> row building -> render -> transport pipeline in [`app/termination_report.py`](../app/termination_report.py)
+
+## Non-Goals
+
+- This repository is not an event-driven identity platform. It intentionally uses polling timers rather than upstream HR webhooks or queued domain events.
+- It is not the system of record for worker lifecycle data. ADP remains authoritative for upstream worker state.
+- It is not a historical warehouse or audit database. The app does not persist local snapshots of prior runs.
+- It is not a full identity-governance or access-certification system.
+- It is not a general-purpose Active Directory reconciliation engine for arbitrary attributes or arbitrary OUs.
+
+## Glossary
+
+- worker: one ADP worker payload after retrieval and any dedupe logic
+- candidate: a worker selected for downstream update evaluation after lookback and country filters
+- diagnostics projection: a compact read-only JSON view built for the diagnostics route rather than the full source payload
+- create-time-only routing identifiers: mail-related identifiers such as `mail`, `userPrincipalName`, `mailNickname`, `proxyAddresses`, and `targetAddress` that are intentionally excluded from update sync
+- directory gateway: the service abstraction that opens LDAP connections, performs employee lookups, resolves manager departments, and applies changes
+- compatibility facade: a thin module kept to preserve legacy import paths while delegating into the newer split packages
 
 ## Sequence Diagrams
 

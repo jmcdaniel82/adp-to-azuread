@@ -84,3 +84,15 @@ class MailGateway(Protocol):
         csv_content: str,
         row_count: int,
     ) -> None: ...
+
+
+class TelemetrySink(Protocol):
+    """Emit structured operational events for observability and alerting."""
+
+    def emit(
+        self,
+        event_name: str,
+        properties: dict[str, Any],
+        *,
+        level: str = "info",
+    ) -> None: ...

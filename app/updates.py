@@ -27,7 +27,7 @@ from .ldap import (
     make_conn_factory,
     safe_unbind,
 )
-from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider
+from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider, build_telemetry_sink
 from .services.update_service import UpdateOrchestrator
 
 
@@ -120,5 +120,6 @@ def build_update_orchestrator() -> UpdateOrchestrator:
         diff_update_attributes=diff_update_attributes,
         entry_attr_value=entry_attr_value,
         is_bind_lost_result=is_bind_lost_result,
+        telemetry_sink=build_telemetry_sink(),
         settings_getter=get_update_job_settings,
     )

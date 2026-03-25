@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from ..adp import extract_assignment_field, extract_business_title, extract_department
-from .candidates import (
+from .candidate_mapping import (
     admin_assignment_allowed,
-    fallback_from_context,
-    is_low_confidence_candidate,
     make_candidate,
     map_signal_candidates,
-    pick_best_candidate,
 )
+from .candidate_selection import fallback_from_context, is_low_confidence_candidate, pick_best_candidate
 from .catalog import CANONICAL_DEPTS, LOW_CONFIDENCE_FIELDS
 from .normalization import is_ambiguous_reference_value, normalize_department_name
 from .signals import collect_local_ac_department_signals
