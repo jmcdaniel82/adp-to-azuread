@@ -50,6 +50,7 @@ The live tests cover:
 
 - `DIAGNOSTICS_URL`
 - `DIAGNOSTICS_FUNCTION_KEY` optional when validating successful authenticated access
+- `DIAGNOSTICS_BEARER_TOKEN` optional when validating future platform-authenticated access
 - `DIAGNOSTICS_VIEW` optional, defaults to `summary`
 
 ### Workflow Dry Run

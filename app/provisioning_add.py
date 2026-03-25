@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from .ldap.scope import ensure_write_scope
 from .provisioning_identity import (
     ProvisioningIdentifiers,
     ProvisioningProfile,
@@ -86,6 +87,7 @@ def create_user_with_retries(
     safe_unbind: Callable[[Any, str], None],
     format_ldap_error: Callable[[Any], str],
     is_bind_lost_result: Callable[[dict], bool],
+    allowed_write_bases: tuple[str, ...] = (),
     run_id: str | None = None,
     job_name: str = "scheduled_provision_new_hires",
 ) -> ProvisioningCreateResult:
@@ -120,6 +122,12 @@ def create_user_with_retries(
                 profile.emp_id,
                 profile.display_name or "<none>",
             )
+            return ProvisioningCreateResult(conn=conn, dn=None)
+        try:
+            ensure_write_scope(request.dn, allowed_write_bases, operation="add")
+        except PermissionError as exc:
+            state.mark_add_failure(summary_stats)
+            logging.error(str(exc))
             return ProvisioningCreateResult(conn=conn, dn=None)
 
         try:

@@ -75,6 +75,7 @@ def get_ldap_settings(require_create_base: bool = False) -> LdapSettings:
         search_base=os.getenv("LDAP_SEARCH_BASE", "").strip(),
         create_base=create_base,
         ca_bundle_path=get_ca_bundle(),
+        allowed_write_bases=parse_csv_env("LDAP_ALLOWED_WRITE_BASES"),
     )
 
 

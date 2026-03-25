@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 from ldap3 import MODIFY_REPLACE
 
 from .adp import generate_password
+from .ldap.scope import ensure_write_scope
 from .reporting import inc_stat
 
 
@@ -37,10 +38,12 @@ def finalize_created_user_account(
     employee_id: str,
     summary_stats: Optional[dict[str, int]] = None,
     password_generator: Callable[[], str] = generate_password,
+    allowed_write_bases: tuple[str, ...] = (),
 ) -> FinalizeCreatedUserResult:
     """Set the initial password and enable the created account."""
     password = password_generator()
     try:
+        ensure_write_scope(dn, allowed_write_bases, operation="finalize")
         conn.extend.microsoft.modify_password(dn, password)
         conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, [0])]})
         conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [512])]})

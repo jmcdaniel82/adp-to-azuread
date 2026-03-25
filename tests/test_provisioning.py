@@ -199,3 +199,22 @@ def test_password_failure_marks_incomplete_account_summary():
     assert result_conn is conn
     assert summary["password_failures"] == 1
     assert summary["incomplete_accounts"] == 1
+
+
+def test_provisioning_blocks_add_outside_allowed_write_bases():
+    conn = DummyConn()
+    emp = _make_emp(employee_id="EMPSCOPE", first="Scope", last="Blocked")
+    summary = {"add_failures": 0}
+
+    result_conn = provision_user_in_ad(
+        emp,
+        conn,
+        "DC=example,DC=com",
+        "OU=Users,DC=example,DC=com",
+        summary_stats=summary,
+        allowed_write_bases=("OU=Different,DC=example,DC=com",),
+    )
+
+    assert result_conn is conn
+    assert conn.add_calls == 0
+    assert summary["add_failures"] == 1

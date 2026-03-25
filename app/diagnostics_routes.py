@@ -19,7 +19,7 @@ from .adp import (
     normalize_id,
 )
 from .azure_compat import func
-from .config import get_ldap_settings, validate_ldap_settings
+from .config import env_truthy, get_ldap_settings, validate_ldap_settings
 from .ldap import (
     create_ldap_server,
     log_ldap_target_details,
@@ -65,6 +65,32 @@ def get_request_params(req: func.HttpRequest) -> dict[str, str]:
         return {}
     parsed = parse_qs(urlparse(url).query)
     return {key: values[-1] for key, values in parsed.items() if values}
+
+
+def get_request_headers(req: func.HttpRequest) -> dict[str, str]:
+    """Read request headers from Azure HttpRequest or a lightweight test stub."""
+    headers = getattr(req, "headers", None)
+    if not headers:
+        return {}
+    return {str(key).lower(): str(value) for key, value in dict(headers).items()}
+
+
+def enforce_diagnostics_platform_auth(req: func.HttpRequest) -> func.HttpResponse | None:
+    """Require App Service platform auth headers when explicitly enabled."""
+    if not env_truthy("DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH", False):
+        return None
+
+    headers = get_request_headers(req)
+    if headers.get("x-ms-client-principal") or headers.get("x-ms-client-principal-id"):
+        return None
+
+    return json_response(
+        {
+            "error": "Diagnostics requires platform authentication.",
+            "requiredHeader": "X-MS-CLIENT-PRINCIPAL",
+        },
+        status_code=401,
+    )
 
 
 def fetch_ad_data_task() -> Optional[dict[str, str]]:
@@ -179,6 +205,10 @@ def parse_recent_hires_limit(params: dict[str, str]) -> tuple[int, Optional[func
 
 def diagnostics_handler(req: func.HttpRequest) -> func.HttpResponse:
     """Serve diagnostics views through one route with explicit query modes."""
+    auth_error = enforce_diagnostics_platform_auth(req)
+    if auth_error is not None:
+        return auth_error
+
     params = get_request_params(req)
     view = params.get("view", "summary").strip().lower()
     logging.info(f"Diagnostics route triggered: view={view}")

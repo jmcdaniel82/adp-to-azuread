@@ -37,7 +37,7 @@ Current schedules:
 - provisioning every 15 minutes, `run_on_startup=False`
 - update hourly
 - termed report on `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1`
-- diagnostics exposed as `GET /api/diagnostics` with Azure Functions function-key auth
+- diagnostics exposed as `GET /api/diagnostics` with Azure Functions function-key auth and deployment-time main-site IP allowlisting
 
 ## Architecture Decisions
 
@@ -56,7 +56,7 @@ Current schedules:
 | `scheduled_provision_new_hires` | Timer | every 15 minutes | ADP, LDAP | LDAP | new AD users, manager links, enabled accounts |
 | `scheduled_update_existing_users` | Timer | hourly, `UPDATE_DRY_RUN=true` by default | ADP, LDAP | LDAP when dry run is disabled | logged attribute diffs or applied attribute changes |
 | `scheduled_last_30_day_termed_report` | Timer | `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1` | ADP | SMTP | emailed CSV report |
-| `GET /api/diagnostics` | HTTP GET | function-key auth | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
+| `GET /api/diagnostics` | HTTP GET | function-key auth + deployed main-site IP allowlist | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
 
 ## Key Invariants
 
@@ -136,6 +136,7 @@ The key boundary is `wrappers -> services -> adapters/packages`. The wrappers st
 - There is no application-side durable storage. The only durable state lives in ADP, Active Directory, SMTP mailboxes, and Azure platform telemetry.
 - Certificate and key material are supplied as environment values and materialized to temp files on demand for the worker process lifetime through [`app/security.py`](../app/security.py).
 - The diagnostics route is the only inbound HTTP surface exposed by application code.
+- In deployed environments, the main site is intended to be IP-allowlisted while the SCM site remains separately reachable for deployment workflows.
 
 ## Module Layout
 
@@ -172,6 +173,7 @@ The key boundary is `wrappers -> services -> adapters/packages`. The wrappers st
   - [`directory.py`](../app/ldap/directory.py): AD lookup helpers and collision inspection
   - [`planning.py`](../app/ldap/planning.py): attribute planning, diffing, and denylist filtering
   - [`modify.py`](../app/ldap/modify.py): modify transport and reconnect recovery
+  - [`scope.py`](../app/ldap/scope.py): DN normalization and add/modify/finalize write-scope enforcement
   - [`updates.py`](../app/ldap/updates.py): compatibility wrapper preserving the legacy LDAP update import surface
 - [`app/adp_client.py`](../app/adp_client.py) and [`app/ldap_client.py`](../app/ldap_client.py): compatibility facades that preserve legacy import paths while delegating into the split packages
 
@@ -293,7 +295,7 @@ Handler path:
 
 Flow summary:
 
-1. HTTP GET arrives at `/api/diagnostics` under the shared Function-level auth boundary.
+1. HTTP GET arrives at `/api/diagnostics` under the shared Function-level auth boundary and the deployed main-site IP allowlist.
 2. Query parameter `view` selects the diagnostics mode.
 3. `summary` and `department-diff` fetch ADP and LDAP data in parallel.
 4. `worker` and `recent-hires` fetch ADP only.
@@ -369,13 +371,14 @@ Secret-backed file handling is centralized in [`app/security.py`](../app/securit
 - LDAP and ADP CA bundles resolve explicitly, with `certifi` fallback
 - temp cert files are tracked and cleaned deterministically
 - secret payload content is not logged
+- LDAP writes can be further constrained in-app with `LDAP_ALLOWED_WRITE_BASES`, which rejects add/modify/finalize operations outside approved DN prefixes
 
 ## Security Model
 
-- The diagnostics route is explicitly configured with Azure Functions function-key auth in [`app/function_app.py`](../app/function_app.py). Requests must include a valid function key or host key unless stronger platform authentication is added outside this repository. All supported diagnostics views currently share that same auth boundary; there is no per-view authorization layer in this repository.
+- The diagnostics route is explicitly configured with Azure Functions function-key auth in [`app/function_app.py`](../app/function_app.py). In deployed environments, the main site is additionally protected with App Service access restrictions so diagnostics is not broadly internet-accessible. All supported diagnostics views currently share that same auth boundary; there is no per-view authorization layer in this repository.
 - Diagnostics is read-only, but `view=worker` can return employee identifiers, names, titles, company, department, hire date, and termination date. Treat the route as an operational PII surface rather than a public health check.
 - The application code reads secrets only from environment variables. Repository guidance expects deployed secrets to come from Azure App Settings or Key Vault-backed settings, while local development uses the untracked `local.settings.json`.
-- LDAP write scope is bounded operationally by the bind account permissions plus the configured `LDAP_SEARCH_BASE` and `LDAP_CREATE_BASE`. The repository does not independently enforce a richer OU or attribute-level authorization model.
+- The repository now enforces an app-side LDAP write allowlist through `LDAP_ALLOWED_WRITE_BASES`, so add, modify, and finalize operations are rejected when the target DN falls outside approved OU prefixes. Bind-account least privilege is still an external directory administration responsibility.
 - Update-path guardrails explicitly block mutation of create-time-only mail-routing identifiers. Diagnostics code paths never call LDAP write helpers.
 - Secret contents are not logged, but operational logs can contain employee identifiers, distinguished names, department decisions, and dry-run/live update deltas for troubleshooting.
 

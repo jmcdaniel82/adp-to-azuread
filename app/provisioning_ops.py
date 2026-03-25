@@ -43,6 +43,7 @@ def provision_user_in_ad(
     *,
     max_retry_attempts: int = 15,
     cn_collision_threshold: int = 5,
+    allowed_write_bases: tuple[str, ...] = (),
     run_id: str | None = None,
     report_incomplete_account: Callable[[ProvisioningIncompleteAccount], None] | None = None,
 ):
@@ -117,6 +118,7 @@ def provision_user_in_ad(
         safe_unbind=safe_unbind,
         format_ldap_error=format_ldap_error,
         is_bind_lost_result=is_bind_lost_result,
+        allowed_write_bases=allowed_write_bases,
         run_id=run_id,
     )
     conn = create_result.conn
@@ -130,6 +132,7 @@ def provision_user_in_ad(
         create_result.dn,
         employee_id=profile.emp_id,
         summary_stats=summary_stats,
+        allowed_write_bases=allowed_write_bases,
     )
     if finalize_result.incomplete_account and report_incomplete_account:
         report_incomplete_account(finalize_result.incomplete_account)

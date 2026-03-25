@@ -183,6 +183,7 @@ class ProvisioningOrchestrator:
                         summary_stats=summary,
                         max_retry_attempts=settings.max_add_retries,
                         cn_collision_threshold=settings.cn_collision_threshold,
+                        allowed_write_bases=directory.settings.allowed_write_bases,
                         run_id=run_id,
                         report_incomplete_account=lambda record: incomplete_accounts.append(
                             {

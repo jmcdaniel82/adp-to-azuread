@@ -9,7 +9,8 @@ The application has three timer jobs and one HTTP diagnostics route:
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
 - `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
 - `scheduled_last_30_day_termed_report` emails a weekly ADP-only CSV of workers terminated in the last 30 days.
-- `GET /api/diagnostics` serves explicit diagnostics views behind Azure Functions function-key auth:
+- `GET /api/diagnostics` serves explicit diagnostics views behind Azure Functions function-key auth.
+  In deployed environments, the main site is additionally IP-allowlisted so diagnostics is not internet-wide:
   - `view=summary`
   - `view=department-diff`
   - `view=worker&employeeId=...`
@@ -101,6 +102,8 @@ The refactor intentionally preserves these rules:
 - Temp cert/key files are tracked and cleaned deterministically via an `atexit` cleanup hook.
 - Secret content is never logged.
 - CA bundle resolution is centralized for both ADP and LDAP TLS verification.
+- LDAP writes can be constrained to approved OUs with `LDAP_ALLOWED_WRITE_BASES`.
+- Production app settings now use Key Vault references for ADP/LDAP secrets and host storage settings.
 
 ## Configuration
 
@@ -125,6 +128,7 @@ Set values in Azure App Settings for deployed environments. For local developmen
 - `LDAP_PASSWORD`
 - `LDAP_SEARCH_BASE`
 - `LDAP_CREATE_BASE` (required for provisioning)
+- `LDAP_ALLOWED_WRITE_BASES` (optional comma-delimited OU/DN allowlist for add/modify/finalize writes)
 - `CA_BUNDLE_PATH`
 - `UPN_SUFFIX`
 
@@ -150,6 +154,10 @@ Set values in Azure App Settings for deployed environments. For local developmen
 - `TERMED_REPORT_FROM_ADDRESS` (default `90day@cfsbrands.com`)
 - `TERMED_REPORT_RECIPIENTS` (default `jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com`)
 - `TERMED_REPORT_SUBJECT` (default `ADP Last 30 Day Termed Report`)
+
+### Diagnostics Hardening
+
+- `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH` (default `false`; optional defense-in-depth check for `X-MS-CLIENT-PRINCIPAL` when platform auth is enabled)
 
 ## Local Run
 
@@ -210,6 +218,7 @@ The deployment workflow now builds a curated `release.zip` containing only the r
 That package is deployed to the Azure Function App `adp-to-azuread` after verification passes.
 
 The current deployment target is Azure Functions Flex Consumption, so the workflow keeps remote build enabled to preserve correct Python dependency build and function indexing behavior.
+Production secrets are expected to come from Key Vault-backed app settings, and the deployed diagnostics surface is intended to be protected by both function-key auth and App Service access restrictions.
 
 Manual publish remains:
 
@@ -221,6 +230,8 @@ func azure functionapp publish adp-to-azuread --python
 
 - Do not commit real credentials/certificates.
 - Keep production secrets in Azure App Settings / Key Vault.
+- Prefer Key Vault references plus managed identity for deployed secrets instead of plain-text app settings.
+- Scope LDAP writes to approved OUs with `LDAP_ALLOWED_WRITE_BASES`.
 - `local.settings.json` is for local-only secrets and should remain untracked.
 - Use `local.settings.example.json` as the committed template.
 - See `SECURITY.md` for responsible disclosure.

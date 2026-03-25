@@ -32,6 +32,7 @@ class LdapSettings:
     search_base: str
     create_base: Optional[str]
     ca_bundle_path: str
+    allowed_write_bases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

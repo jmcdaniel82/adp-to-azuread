@@ -126,7 +126,13 @@ class DefaultDirectoryGateway(DirectoryGateway):
         dn: str,
         changes: dict,
     ) -> DirectoryContext | None:
-        conn = self._apply_changes(directory.conn, dn, changes, directory.conn_factory)
+        conn = self._apply_changes(
+            directory.conn,
+            dn,
+            changes,
+            directory.conn_factory,
+            allowed_write_bases=directory.settings.allowed_write_bases,
+        )
         if not conn:
             return None
         return DirectoryContext(

@@ -13,6 +13,7 @@ try:
 except ModuleNotFoundError:
 
     class _DummyAuthLevel:
+        ANONYMOUS = "anonymous"
         FUNCTION = "function"
 
     class _DummyDecoratorApp:

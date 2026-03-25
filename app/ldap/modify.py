@@ -10,10 +10,23 @@ from ldap3 import Connection
 from ..telemetry import StructuredLogTelemetrySink
 from .connection import format_ldap_error, is_bind_lost_result, safe_unbind
 from .planning import filter_blocked_update_changes
+from .scope import ensure_write_scope
 
 
-def apply_ldap_modifications(conn, dn: str, changes: dict, conn_factory=None) -> Optional[Connection]:
+def apply_ldap_modifications(
+    conn,
+    dn: str,
+    changes: dict,
+    conn_factory=None,
+    *,
+    allowed_write_bases: tuple[str, ...] = (),
+) -> Optional[Connection]:
     """Apply LDAP modify ops with bind-loss recovery."""
+    try:
+        ensure_write_scope(dn, allowed_write_bases, operation="modify")
+    except PermissionError as exc:
+        logging.error(str(exc))
+        return conn
     filtered_changes = filter_blocked_update_changes(changes, dn)
     if not filtered_changes:
         return conn

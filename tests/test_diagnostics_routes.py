@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from app import diagnostics_routes
 
 
-def make_request(params=None, url="https://example.test/api/diagnostics"):
-    return SimpleNamespace(params=params or {}, url=url)
+def make_request(params=None, url="https://example.test/api/diagnostics", headers=None):
+    return SimpleNamespace(params=params or {}, url=url, headers=headers or {})
 
 
 def response_json(response):
@@ -172,3 +172,34 @@ def test_recent_hires_view_limits_and_sorts_results(monkeypatch):
     assert payload["returned"] == 1
     assert payload["workers"][0]["employeeId"] == "B2"
     assert "workAssignments" not in payload["workers"][0]
+
+
+def test_diagnostics_requires_platform_auth_when_enabled(monkeypatch):
+    monkeypatch.setenv("DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH", "true")
+
+    response = diagnostics_routes.diagnostics_handler(make_request({"view": "summary"}))
+
+    assert response.status_code == 401
+    assert response_json(response) == {
+        "error": "Diagnostics requires platform authentication.",
+        "requiredHeader": "X-MS-CLIENT-PRINCIPAL",
+    }
+
+
+def test_diagnostics_allows_platform_authenticated_request(monkeypatch):
+    monkeypatch.setenv("DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH", "true")
+    workers = [build_worker("A1", "Alice", "Smith", department="Sales")]
+    ldap_map = {"A1": "sales"}
+
+    monkeypatch.setattr(diagnostics_routes, "get_adp_token", lambda: "token")
+    monkeypatch.setattr(diagnostics_routes, "get_adp_employees", lambda token: workers)
+    monkeypatch.setattr(diagnostics_routes, "fetch_ad_data_task", lambda: ldap_map)
+
+    response = diagnostics_routes.diagnostics_handler(
+        make_request(
+            {"view": "summary"},
+            headers={"X-MS-CLIENT-PRINCIPAL": "encoded-principal"},
+        )
+    )
+
+    assert response.status_code == 200

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.constants import ATTR_MAIL, ATTR_USER_PRINCIPAL_NAME
+from app.ldap.modify import apply_ldap_modifications
 from app.ldap_client import diff_update_attributes
 from app.models import LdapSettings, UpdateJobSettings
 from app.updates import run_scheduled_update_existing_users, select_update_candidates
@@ -296,3 +297,17 @@ def test_scheduled_update_raises_when_token_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ADP token"):
         run_scheduled_update_existing_users(None)
+
+
+def test_apply_ldap_modifications_blocks_dn_outside_allowed_write_bases():
+    conn = _DummyConn([])
+
+    updated_conn = apply_ldap_modifications(
+        conn,
+        "CN=User,OU=Outside,DC=example,DC=com",
+        {"title": [("MODIFY_REPLACE", ["New Title"])]},
+        allowed_write_bases=("OU=Inside,DC=example,DC=com",),
+    )
+
+    assert updated_conn is conn
+    assert conn.modify_calls == []
