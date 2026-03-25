@@ -14,6 +14,7 @@ env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: 'release.zip'
   AZURE_FUNCTIONAPP_PRODUCTION_NAME: 'adp-to-azuread'
   AZURE_FUNCTIONAPP_STAGING_NAME: ${{ vars.AZURE_FUNCTIONAPP_STAGING_NAME }}
+  AZURE_FUNCTIONAPP_RESOURCE_GROUP: 'rg-vnet-scus-01'
   PYTHON_VERSION: '3.10' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
@@ -128,6 +129,7 @@ jobs:
         if: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME != '' }}
         env:
           FUNCTIONAPP_NAME: ${{ env.AZURE_FUNCTIONAPP_STAGING_NAME }}
+          FUNCTIONAPP_RESOURCE_GROUP: ${{ env.AZURE_FUNCTIONAPP_RESOURCE_GROUP }}
         run: python scripts/assert_function_indexing.py
 
       - name: Deploy to production Azure Functions
@@ -142,5 +144,6 @@ jobs:
       - name: Smoke check production function indexing
         env:
           FUNCTIONAPP_NAME: ${{ env.AZURE_FUNCTIONAPP_PRODUCTION_NAME }}
+          FUNCTIONAPP_RESOURCE_GROUP: ${{ env.AZURE_FUNCTIONAPP_RESOURCE_GROUP }}
         run: python scripts/assert_function_indexing.py
           

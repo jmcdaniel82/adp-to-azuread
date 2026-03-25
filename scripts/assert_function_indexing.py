@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 
 def _run_az(*args: str) -> str:
+    az_executable = shutil.which("az") or shutil.which("az.cmd") or "az"
     completed = subprocess.run(
-        ["az", *args],
-        check=True,
+        [az_executable, *args],
         capture_output=True,
         text=True,
     )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown az error"
+        raise RuntimeError(f"az {' '.join(args)} failed: {stderr}")
     return completed.stdout.strip()
 
 
@@ -29,15 +33,20 @@ def main() -> int:
         if name.strip()
     }
     resource_group = os.environ.get("FUNCTIONAPP_RESOURCE_GROUP") or _run_az(
-        "functionapp",
-        "show",
+        "resource",
+        "list",
         "--name",
         app_name,
+        "--resource-type",
+        "Microsoft.Web/sites",
         "--query",
-        "resourceGroup",
+        "[0].resourceGroup",
         "-o",
         "tsv",
     )
+    if not resource_group:
+        print(f"Could not resolve resource group for Function App {app_name}.", file=sys.stderr)
+        return 1
     raw = _run_az("functionapp", "function", "list", "-g", resource_group, "-n", app_name, "-o", "json")
     functions = json.loads(raw or "[]")
     indexed_names = {item["name"].split("/")[-1] for item in functions if item.get("name")}
