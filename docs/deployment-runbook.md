@@ -35,3 +35,8 @@ Production is always followed by the same indexed-function smoke check.
   missing modules.
 - Staging write-path failures:
   keep production blocked until the staging smoke is green.
+- Diagnostics auth failures:
+  confirm App Service Authentication is enabled, the Entra app registration and
+  federated credential still exist, `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID`
+  still points at the assigned user-managed identity, and the caller is within
+  both the IP allowlist and the App Service authorization policy.

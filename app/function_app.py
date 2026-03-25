@@ -33,7 +33,7 @@ def scheduled_last_30_day_termed_report(mytimer: func.TimerRequest):
 
 
 @app.function_name(name="diagnostics")
-@app.route(route="diagnostics", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+@app.route(route="diagnostics", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def diagnostics(req: func.HttpRequest) -> func.HttpResponse:
     """Expose diagnostics views for summary, diff, worker, and recent-hire lookups."""
     return diagnostics_handler(req)

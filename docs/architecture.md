@@ -37,7 +37,7 @@ Current schedules:
 - provisioning every 15 minutes, `run_on_startup=False`
 - update hourly
 - termed report on `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1`
-- diagnostics exposed as `GET /api/diagnostics` with Azure Functions function-key auth and deployment-time main-site IP allowlisting
+- diagnostics exposed as `GET /api/diagnostics` with Microsoft Entra App Service authentication, deployment-time main-site IP allowlisting, and an in-app platform-auth header check when enabled
 
 ## Architecture Decisions
 
@@ -56,7 +56,7 @@ Current schedules:
 | `scheduled_provision_new_hires` | Timer | every 15 minutes | ADP, LDAP | LDAP | new AD users, manager links, enabled accounts |
 | `scheduled_update_existing_users` | Timer | hourly, `UPDATE_DRY_RUN=true` by default | ADP, LDAP | LDAP when dry run is disabled | logged attribute diffs or applied attribute changes |
 | `scheduled_last_30_day_termed_report` | Timer | `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1` | ADP | SMTP | emailed CSV report |
-| `GET /api/diagnostics` | HTTP GET | function-key auth + deployed main-site IP allowlist | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
+| `GET /api/diagnostics` | HTTP GET | Entra App Service auth + deployed main-site IP allowlist | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
 
 ## Key Invariants
 
@@ -131,6 +131,7 @@ The key boundary is `wrappers -> services -> adapters/packages`. The wrappers st
 
 - The repository deploys one Azure Function App target, `adp-to-azuread`, and the runtime surface is limited to three timer triggers plus one HTTP diagnostics route.
 - The current deployment target is Azure Functions Flex Consumption. The deployment workflow uses remote build so Python dependencies are built during deployment and function indexing remains intact in Azure.
+- Because the deployment target is Flex Consumption, the deployed diagnostics authentication path uses Microsoft Entra App Service authentication with managed identity federated credentials rather than App Service certificate-based auth.
 - Outbound dependencies are ADP HTTPS with mTLS client certificate material, LDAPS to on-prem Active Directory, SMTP for report delivery, and Azure-native logging/telemetry via the Functions host and Application Insights.
 - The repository does not declare or provision network topology. Reachability to on-prem AD, private DNS, firewall rules, and any hybrid/VNet connectivity are environment-owned prerequisites.
 - There is no application-side durable storage. The only durable state lives in ADP, Active Directory, SMTP mailboxes, and Azure platform telemetry.
@@ -295,11 +296,12 @@ Handler path:
 
 Flow summary:
 
-1. HTTP GET arrives at `/api/diagnostics` under the shared Function-level auth boundary and the deployed main-site IP allowlist.
-2. Query parameter `view` selects the diagnostics mode.
-3. `summary` and `department-diff` fetch ADP and LDAP data in parallel.
-4. `worker` and `recent-hires` fetch ADP only.
-5. Results are returned as JSON with bounded, explicit response shapes.
+1. HTTP GET arrives at `/api/diagnostics` under the deployed App Service authentication policy and the main-site IP allowlist.
+2. The route handler requires the App Service auth principal headers when `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH=true`.
+3. Query parameter `view` selects the diagnostics mode.
+4. `summary` and `department-diff` fetch ADP and LDAP data in parallel.
+5. `worker` and `recent-hires` fetch ADP only.
+6. Results are returned as JSON with bounded, explicit response shapes.
 
 ## Data Flow
 
@@ -375,10 +377,14 @@ Secret-backed file handling is centralized in [`app/security.py`](../app/securit
 
 ## Security Model
 
-- The diagnostics route is explicitly configured with Azure Functions function-key auth in [`app/function_app.py`](../app/function_app.py). In deployed environments, the main site is additionally protected with App Service access restrictions so diagnostics is not broadly internet-accessible. All supported diagnostics views currently share that same auth boundary; there is no per-view authorization layer in this repository.
+- The diagnostics route is configured as anonymous at the Functions layer in [`app/function_app.py`](../app/function_app.py) and is intended to be protected by App Service Authentication with Microsoft Entra ID before the request reaches the function code. In deployed environments, the main site is additionally protected with App Service access restrictions so diagnostics is not broadly internet-accessible.
+- The deployed Entra model uses built-in App Service authentication with a dedicated app registration per environment and a user-assigned managed identity federated credential to avoid client secrets. The application then checks for the injected `X-MS-CLIENT-PRINCIPAL` headers when `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH=true`.
+- All supported diagnostics views currently share that same auth boundary; there is no per-view authorization layer in this repository.
 - Diagnostics is read-only, but `view=worker` can return employee identifiers, names, titles, company, department, hire date, and termination date. Treat the route as an operational PII surface rather than a public health check.
 - The application code reads secrets only from environment variables. Repository guidance expects deployed secrets to come from Azure App Settings or Key Vault-backed settings, while local development uses the untracked `local.settings.json`.
+- Production secrets are expected to come from Key Vault-backed app settings, and the deployed diagnostics auth path uses managed identities plus Entra trust rather than app secrets stored in the repo.
 - The repository now enforces an app-side LDAP write allowlist through `LDAP_ALLOWED_WRITE_BASES`, so add, modify, and finalize operations are rejected when the target DN falls outside approved OU prefixes. Bind-account least privilege is still an external directory administration responsibility.
+- The exact staging-OU rights expected of the LDAP bind account are documented in [`docs/ldap-bind-account-acls.md`](./ldap-bind-account-acls.md).
 - Update-path guardrails explicitly block mutation of create-time-only mail-routing identifiers. Diagnostics code paths never call LDAP write helpers.
 - Secret contents are not logged, but operational logs can contain employee identifiers, distinguished names, department decisions, and dry-run/live update deltas for troubleshooting.
 

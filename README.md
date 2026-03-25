@@ -9,7 +9,7 @@ The application has three timer jobs and one HTTP diagnostics route:
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
 - `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
 - `scheduled_last_30_day_termed_report` emails a weekly ADP-only CSV of workers terminated in the last 30 days.
-- `GET /api/diagnostics` serves explicit diagnostics views behind Azure Functions function-key auth.
+- `GET /api/diagnostics` serves explicit diagnostics views behind Microsoft Entra authentication at the App Service layer.
   In deployed environments, the main site is additionally IP-allowlisted so diagnostics is not internet-wide:
   - `view=summary`
   - `view=department-diff`
@@ -104,6 +104,7 @@ The refactor intentionally preserves these rules:
 - CA bundle resolution is centralized for both ADP and LDAP TLS verification.
 - LDAP writes can be constrained to approved OUs with `LDAP_ALLOWED_WRITE_BASES`.
 - Production app settings now use Key Vault references for ADP/LDAP secrets and host storage settings.
+- Deployed diagnostics access is intended to use Microsoft Entra App Service authentication backed by a managed identity federated credential, with the main site separately IP-allowlisted.
 
 ## Configuration
 
@@ -157,7 +158,7 @@ Set values in Azure App Settings for deployed environments. For local developmen
 
 ### Diagnostics Hardening
 
-- `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH` (default `false`; optional defense-in-depth check for `X-MS-CLIENT-PRINCIPAL` when platform auth is enabled)
+- `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH` (default `false`; set `true` in deployed environments so the app rejects requests that do not arrive through App Service auth)
 
 ## Local Run
 
@@ -218,7 +219,8 @@ The deployment workflow now builds a curated `release.zip` containing only the r
 That package is deployed to the Azure Function App `adp-to-azuread` after verification passes.
 
 The current deployment target is Azure Functions Flex Consumption, so the workflow keeps remote build enabled to preserve correct Python dependency build and function indexing behavior.
-Production secrets are expected to come from Key Vault-backed app settings, and the deployed diagnostics surface is intended to be protected by both function-key auth and App Service access restrictions.
+For the same platform reason, deployed diagnostics authentication uses Microsoft Entra plus a managed identity federated credential rather than App Service certificate-based auth.
+Production secrets are expected to come from Key Vault-backed app settings, and the deployed diagnostics surface is intended to be protected by Microsoft Entra App Service authentication plus main-site App Service access restrictions.
 
 Manual publish remains:
 
@@ -232,6 +234,7 @@ func azure functionapp publish adp-to-azuread --python
 - Keep production secrets in Azure App Settings / Key Vault.
 - Prefer Key Vault references plus managed identity for deployed secrets instead of plain-text app settings.
 - Scope LDAP writes to approved OUs with `LDAP_ALLOWED_WRITE_BASES`.
+- See [docs/ldap-bind-account-acls.md](docs/ldap-bind-account-acls.md) for the exact staging-OU ACL and operator checklist for the LDAP bind account.
 - `local.settings.json` is for local-only secrets and should remain untracked.
 - Use `local.settings.example.json` as the committed template.
 - See `SECURITY.md` for responsible disclosure.

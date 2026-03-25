@@ -16,7 +16,7 @@ The live tests cover:
 - ADP workers fetch
 - LDAP TLS connectivity and search smoke
 - SMTP send validation for the termed report path
-- Azure-hosted diagnostics auth and payload smoke
+- Azure-hosted diagnostics Entra-auth and payload smoke
 - End-to-end scheduled update workflow smoke with `dry_run=True` and a short lookback window
 - Provisioning create-path write test against a staging OU with cleanup
 - Scheduled update live-write test against a staging account with cleanup
@@ -49,8 +49,7 @@ The live tests cover:
 ### Diagnostics
 
 - `DIAGNOSTICS_URL`
-- `DIAGNOSTICS_FUNCTION_KEY` optional when validating successful authenticated access
-- `DIAGNOSTICS_BEARER_TOKEN` optional when validating future platform-authenticated access
+- `DIAGNOSTICS_BEARER_TOKEN` optional when validating successful Entra-authenticated access
 - `DIAGNOSTICS_VIEW` optional, defaults to `summary`
 
 ### Workflow Dry Run

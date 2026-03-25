@@ -19,6 +19,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - `docs/integration-tests.md` with environment gating and run instructions for the live suite.
 - `docs/monitoring.md` with KQL queries for timer failures, SMTP failures, repeated LDAP reconnects, and incomplete provisioning reconciliation.
 - `docs/deployment-runbook.md` covering Flex Consumption remote-build deployment, post-deploy indexing smoke, and rollback expectations.
+- `docs/ldap-bind-account-acls.md` with the exact staging-OU ACL expectation and admin checklist for the LDAP bind account.
 - Structured application telemetry in `app/telemetry.py` for:
   - `job_run`,
   - `directory_reconnect`,
@@ -27,7 +28,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Live integration write-path coverage under `tests/integration/` for:
   - staging-OU provisioning create,
   - staging-user update writes,
-  - diagnostics function-key auth validation.
+  - diagnostics Entra-auth validation.
 - Golden ADP regression fixtures under `tests/fixtures/adp/` for malformed, partial, duplicate, and edge-case worker payloads.
 - Architecture-boundary regression coverage in `tests/test_architecture_imports.py` to keep internal modules off the compatibility facades and worker export wrapper.
 
@@ -71,6 +72,8 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
   - deterministic cleanup of generated temp files on process exit,
   - no secret payload logging.
 - Centralized CA bundle resolution for ADP and LDAP TLS verification paths.
+- Diagnostics auth moved beyond Functions keys to App Service Authentication with Microsoft Entra, backed by a managed identity federated credential and deployed IP allowlisting.
+- LDAP write paths now have matching documentation for least-privilege directory ACLs on the staging OU.
 
 ### Tests - Unreleased
 
@@ -107,6 +110,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Added staging smoke-test checklist for timer jobs, HTTP routes, ADP token retrieval, and LDAP bind/rebind validation.
 - Updated repository documentation to reflect the new package layout, Azure Functions v2 root shim, CI gates, and local secret-handling expectations.
 - Consolidated the old `process` and `export` HTTP endpoints into one `GET /api/diagnostics` route with explicit query-driven views.
+- Diagnostics routing now relies on App Service / Entra authentication at the platform boundary, with the Function route itself configured as anonymous and the app enforcing `X-MS-CLIENT-PRINCIPAL` presence when deployed auth is enabled.
 - Provisioning timer startup behavior was tightened by disabling cold-start execution (`run_on_startup=False`).
 - Fatal timer-path failures now raise exceptions instead of logging and returning success-like completions.
 - `mypy app` is now part of a passing local/CI contract after the Azure compatibility and service refactor cleanup.
