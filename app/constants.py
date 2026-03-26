@@ -50,8 +50,50 @@ AD_UPDATE_SEARCH_ATTRIBUTES = [
     "userAccountControl",
 ]
 
+# The bounded attribute set managed by the scheduled update workflow.
+UPDATE_MANAGED_ATTRIBUTES = (
+    ATTR_DISPLAY_NAME,
+    "title",
+    "company",
+    "department",
+    "manager",
+    "l",
+    "postalCode",
+    "st",
+    "streetAddress",
+    "co",
+    "c",
+    "countryCode",
+    "userAccountControl",
+)
+
+# Optional update-field groups used by the scheduled update workflow.
+UPDATE_FIELD_GROUPS = {
+    "identity": (
+        ATTR_DISPLAY_NAME,
+        "title",
+        "company",
+    ),
+    "department": ("department",),
+    "manager": ("manager",),
+    "address": (
+        "l",
+        "postalCode",
+        "st",
+        "streetAddress",
+        "co",
+        "c",
+        "countryCode",
+    ),
+    "status": ("userAccountControl",),
+}
+
 ADP_COUNTRY_NUMERIC_BY_ALPHA2 = {
     "US": 840,
     "MX": 484,
     "CA": 124,
 }
+
+# Diagnostics endpoint result set limits
+DIAGNOSTICS_DEFAULT_RECENT_HIRES_LIMIT = 25
+DIAGNOSTICS_MAX_RECENT_HIRES_LIMIT = 100

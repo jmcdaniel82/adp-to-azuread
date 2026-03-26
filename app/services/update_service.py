@@ -7,10 +7,32 @@ from typing import Callable
 
 from ..adp import extract_employee_id
 from ..config import get_update_job_settings
-from ..constants import AD_UPDATE_SEARCH_ATTRIBUTES
+from ..constants import AD_UPDATE_SEARCH_ATTRIBUTES, UPDATE_FIELD_GROUPS, UPDATE_MANAGED_ATTRIBUTES
 from ..models import UpdateJobSettings
 from ..services.interfaces import DirectoryGateway, TelemetrySink, WorkerProvider
 from ..telemetry import new_run_id
+
+
+def _resolve_effective_enabled_fields(settings: UpdateJobSettings) -> tuple[str, ...] | None:
+    """Return the configured update-field allowlist, or None when unrestricted."""
+    if not settings.enabled_fields and not settings.enabled_groups:
+        return None
+    requested_fields = set(settings.enabled_fields)
+    for group_name in settings.enabled_groups:
+        requested_fields.update(UPDATE_FIELD_GROUPS[group_name])
+    return tuple(attr for attr in UPDATE_MANAGED_ATTRIBUTES if attr in requested_fields)
+
+
+def _filter_desired_update_attributes(
+    desired: dict,
+    *,
+    enabled_fields: tuple[str, ...] | None,
+) -> dict:
+    """Restrict planned update attributes to the configured allowlist."""
+    if enabled_fields is None:
+        return dict(desired)
+    enabled_field_set = set(enabled_fields)
+    return {attr: value for attr, value in desired.items() if attr in enabled_field_set}
 
 
 class UpdateOrchestrator:
@@ -45,10 +67,18 @@ class UpdateOrchestrator:
         del mytimer
         run_id = new_run_id("scheduled_update_existing_users")
         settings = self._settings_getter()
+        effective_enabled_fields = _resolve_effective_enabled_fields(settings)
         logging.info(
             f"[INFO] scheduled_update_existing_users triggered "
             f"(run_id={run_id}, dry_run={settings.dry_run}, lookback_days={settings.lookback_days})"
         )
+        if effective_enabled_fields is not None:
+            logging.info(
+                "[INFO] scheduled_update_existing_users field filter active "
+                f"(groups={settings.enabled_groups}, fields={settings.enabled_fields}, "
+                f"effective={effective_enabled_fields}, "
+                f"always_disable_terminated={settings.always_disable_terminated})"
+            )
 
         fatal_reason = ""
         try:
@@ -231,6 +261,11 @@ class UpdateOrchestrator:
                 dn = str(self._entry_attr_value(entry, "distinguishedName") or "<unknown DN>")
                 if self._is_terminated_employee(emp):
                     desired = {"userAccountControl": 514}
+                    if not settings.always_disable_terminated:
+                        desired = _filter_desired_update_attributes(
+                            desired,
+                            enabled_fields=effective_enabled_fields,
+                        )
                 else:
                     current_department = str(self._entry_attr_value(entry, "department") or "").strip()
                     current_manager_dn = str(self._entry_attr_value(entry, "manager") or "").strip()
@@ -245,6 +280,11 @@ class UpdateOrchestrator:
                         directory.settings.search_base,
                         current_ad_department=current_department,
                         manager_department=current_manager_department,
+                        enabled_fields=effective_enabled_fields,
+                    )
+                    desired = _filter_desired_update_attributes(
+                        desired,
+                        enabled_fields=effective_enabled_fields,
                     )
                 changes = self._diff_update_attributes(entry, desired, context=f"{emp_id} at {dn}")
                 if not changes:

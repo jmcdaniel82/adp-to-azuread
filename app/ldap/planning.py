@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Collection, Optional
 
 from ldap3 import MODIFY_REPLACE
 
@@ -27,6 +27,11 @@ from ..department.resolver import normalize_department_name, resolve_local_ac_de
 from .directory import entry_attr_value, get_department_by_dn, get_manager_dn
 
 ACCOUNTDISABLE_FLAG = 0x0002
+
+
+def _is_update_field_enabled(attr: str, enabled_fields: Collection[str] | None) -> bool:
+    """Return True when an update attribute is active for the current planning pass."""
+    return enabled_fields is None or attr in enabled_fields
 
 
 def is_email_identifier_attribute(attr: str) -> bool:
@@ -54,50 +59,66 @@ def plan_update_attributes(
     ldap_search_base: str,
     current_ad_department: str = "",
     manager_department: str = "",
+    enabled_fields: Collection[str] | None = None,
 ) -> tuple[dict, dict, Optional[str], str]:
     """Return exact desired update attrs plus department-planning context."""
     emp_id = extract_employee_id(emp)
-    country_attrs = build_ad_country_attributes(extract_work_address_field(emp, "countryCode"))
+    desired: dict[str, object] = {}
 
-    desired = {
-        "title": extract_business_title(emp) or extract_assignment_field(emp, "jobTitle"),
-        "company": extract_company(emp),
-        "l": extract_work_address_field(emp, "cityName"),
-        "postalCode": extract_work_address_field(emp, "postalCode"),
-        "st": extract_state_from_work(emp),
-        "streetAddress": extract_work_address_field(emp, "lineOne"),
-        "co": country_attrs["co"],
-        "c": country_attrs["c"],
-        "countryCode": country_attrs["countryCode"],
-    }
-    if get_hire_date(emp):
+    if _is_update_field_enabled("title", enabled_fields):
+        desired["title"] = extract_business_title(emp) or extract_assignment_field(emp, "jobTitle")
+    if _is_update_field_enabled("company", enabled_fields):
+        desired["company"] = extract_company(emp)
+    if _is_update_field_enabled("l", enabled_fields):
+        desired["l"] = extract_work_address_field(emp, "cityName")
+    if _is_update_field_enabled("postalCode", enabled_fields):
+        desired["postalCode"] = extract_work_address_field(emp, "postalCode")
+    if _is_update_field_enabled("st", enabled_fields):
+        desired["st"] = extract_state_from_work(emp)
+    if _is_update_field_enabled("streetAddress", enabled_fields):
+        desired["streetAddress"] = extract_work_address_field(emp, "lineOne")
+    if any(
+        _is_update_field_enabled(attr, enabled_fields) for attr in ("co", "c", "countryCode")
+    ):
+        country_attrs = build_ad_country_attributes(extract_work_address_field(emp, "countryCode"))
+        for attr in ("co", "c", "countryCode"):
+            if _is_update_field_enabled(attr, enabled_fields):
+                desired[attr] = country_attrs[attr]
+    if _is_update_field_enabled("userAccountControl", enabled_fields) and get_hire_date(emp):
         desired["userAccountControl"] = get_user_account_control(emp)
     person = emp.get("person", {}) if isinstance(emp, dict) else {}
     preferred_first, preferred_last = get_preferred_first_last(person)
-    if preferred_first and preferred_last:
+    if _is_update_field_enabled(ATTR_DISPLAY_NAME, enabled_fields) and preferred_first and preferred_last:
         desired[ATTR_DISPLAY_NAME] = get_display_name(person)
 
-    manager_dn = get_manager_dn(
-        conn,
-        ldap_search_base,
-        extract_manager_id(emp),
-        subject_employee_id=emp_id,
-    )
+    manager_dn = None
     resolved_manager_department = (manager_department or "").strip()
-    if manager_dn:
-        desired["manager"] = manager_dn
-        manager_dept_from_dn = get_department_by_dn(conn, manager_dn)
-        if manager_dept_from_dn:
-            resolved_manager_department = manager_dept_from_dn
+    resolution: dict = {}
+    if _is_update_field_enabled("manager", enabled_fields) or _is_update_field_enabled(
+        "department", enabled_fields
+    ):
+        manager_dn = get_manager_dn(
+            conn,
+            ldap_search_base,
+            extract_manager_id(emp),
+            subject_employee_id=emp_id,
+        )
+        if manager_dn and _is_update_field_enabled("manager", enabled_fields):
+            desired["manager"] = manager_dn
+        if manager_dn and _is_update_field_enabled("department", enabled_fields):
+            manager_dept_from_dn = get_department_by_dn(conn, manager_dn)
+            if manager_dept_from_dn:
+                resolved_manager_department = manager_dept_from_dn
 
-    resolution = resolve_local_ac_department(
-        emp,
-        current_ad_department=current_ad_department,
-        manager_department=resolved_manager_department,
-    )
-    resolved_department = resolution.get("proposedDepartmentV2")
-    if resolved_department:
-        desired["department"] = resolved_department
+    if _is_update_field_enabled("department", enabled_fields):
+        resolution = resolve_local_ac_department(
+            emp,
+            current_ad_department=current_ad_department,
+            manager_department=resolved_manager_department,
+        )
+        resolved_department = resolution.get("proposedDepartmentV2")
+        if resolved_department:
+            desired["department"] = resolved_department
 
     if env_truthy("LOG_DEPARTMENT_MAPPING", False):
         logging.info(
@@ -117,6 +138,7 @@ def build_update_attributes(
     ldap_search_base: str,
     current_ad_department: str = "",
     manager_department: str = "",
+    enabled_fields: Collection[str] | None = None,
 ) -> dict:
     """Map ADP worker payload into AD attributes for update flow."""
     desired, _resolution, _manager_dn, _resolved_manager_department = plan_update_attributes(
@@ -125,6 +147,7 @@ def build_update_attributes(
         ldap_search_base,
         current_ad_department=current_ad_department,
         manager_department=manager_department,
+        enabled_fields=enabled_fields,
     )
     return desired
 

@@ -103,9 +103,13 @@ class DefaultDirectoryGateway(DirectoryGateway):
         attributes: list[str],
         search_scope: int = 2,
     ) -> DirectoryLookup:
+        from ldap3.utils.conv import escape_filter_chars
+        
+        # Escape employee_id to prevent LDAP injection
+        escaped_id = escape_filter_chars(employee_id)
         found = directory.conn.search(
             directory.settings.search_base,
-            f"(employeeID={employee_id})",
+            f"(employeeID={escaped_id})",
             attributes=attributes,
             search_scope=search_scope,
         )

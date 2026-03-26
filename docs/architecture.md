@@ -13,12 +13,69 @@ The app exposes four runtime entrypoints:
 
 External integrations:
 
-- ADP OAuth token endpoint and workers API
-- LDAP / Active Directory over TLS
+- ADP OAuth token endpoint and workers API (mTLS client certificate auth)
+- LDAP / Active Directory over TLS v1.2+ (connection pooled, 2-10 concurrent)
 - SMTP for the termed report
 - Azure Functions host and Application Insights logging
 
 There is no application database in this repo. Each invocation re-fetches source data, computes a working set in memory, performs LDAP writes or emits a report, and exits.
+
+## Security Architecture
+
+### Authentication & Authorization
+
+1. **Diagnostics Endpoint**: Function-level auth (`auth_level=FUNCTION`)
+   - Requires `x-functions-key` header or Azure authentication
+   - No anonymous access to sensitive employee/department data
+   - Optional app-service auth enforcement via `DIAGNOSTICS_REQUIRE_APP_SERVICE_AUTH`
+
+2. **ADP API**: mTLS client certificate + OAuth2 client credentials
+   - Certificate materialized from base64/PEM environment variables
+   - Temporary files cleaned up at process exit
+   - Token validated and refreshed per sync operation
+
+3. **LDAP Bind**: NTLM authentication over TLS v1.2+
+   - Bind DN and password from environment (no hardcoded defaults)
+   - Connection pooling configured: min=2, max=10 (customizable)
+   - Connection pool reuse minimizes bind/unbind cycles
+
+### Credential Management
+
+- **No Infrastructure Details in Code**: SMTP host, email addresses, and all defaults removed
+- **Environment Variable Validation**: All required secrets checked at startup (fast-fail)
+- **Log Redaction**: `SensitiveDataFilter` prevents password/secret leakage in logs
+- **Temporary File Cleanup**: Certificates materialized to disk deleted at process exit
+
+### Input Validation & Injection Prevention
+
+- **LDAP Filter Escaping**: `escape_filter_chars()` prevents LDAP injection (e.g., SQL-like `*)(|(cn=*` payloads)
+- **Employee ID Normalization**: Validated and escaped before filter construction
+- **Query Parameter Bounds**: `limit` parameter capped at 100 for diagnostics endpoints
+- **Write Scope Guardrails**: `LDAP_ALLOWED_WRITE_BASES` prevents modifications outside permitted organizational units
+
+## Performance Optimization
+
+### LDAP Connection Pooling
+
+Configurable pool maintains 2-10 reusable connections to reduce bind/unbind overhead:
+
+- `LDAP_POOL_MIN_SIZE`: Minimum connections kept ready (default: 2)
+- `LDAP_POOL_MAX_SIZE`: Maximum concurrent connections (default: 10)
+- Pool stats logged for observability
+
+**Operational effect**: Reusing LDAP connections reduces repeated bind overhead, lowers reconnect churn, and makes provisioning and update paths less sensitive to connection setup latency.
+
+### Batch Processing & Caching
+
+- **Department Mapping Cache**: Preloaded once per sync to avoid N+1 queries
+- **Manager DN Cache**: Preloaded for efficient manager relationship resolution
+- **Worker Deduplication**: ADP records deduplicated by employee ID before processing
+
+### Retry Logic
+
+- **Exponential Backoff**: Custom strategy for transient ADP API failures (max 15 retries)
+- **LDAP Connection Recovery**: Automatic reconnection on bind loss
+- **Connection Pool Fault Tolerance**: Graceful degradation when connections temporarily unavailable
 
 ## Runtime Model
 
@@ -30,24 +87,190 @@ Runtime host configuration is minimal and standard in [`host.json`](../host.json
 - Application Insights sampling
 - Extension bundle `Microsoft.Azure.Functions.ExtensionBundle`
 
-Trigger wiring is intentionally thin. [`app/function_app.py`](../app/function_app.py) binds schedules and the diagnostics route, then delegates immediately into orchestration modules.
+Trigger wiring is intentionally thin. [`app/function_app.py`](../app/function_app.py) initializes logging with sensitive data redaction, binds schedules and the diagnostics route, then delegates immediately into orchestration modules.
 
 Current schedules:
 
 - provisioning every 15 minutes, `run_on_startup=False`
 - update hourly
 - termed report on `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1`
-- diagnostics exposed as `GET /api/diagnostics` with Microsoft Entra App Service authentication, deployment-time main-site IP allowlisting, and an in-app platform-auth header check when enabled
+- diagnostics exposed as `GET /api/diagnostics` with function-level auth (no anonymous access)
+
+## Configuration Management
+
+### Required Environment Variables (No Defaults)
+
+**ADP Integration**:
+
+- `ADP_TOKEN_URL`: OAuth2 token endpoint
+- `ADP_EMPLOYEE_URL`: Workers API endpoint
+- `ADP_CLIENT_ID`: Client credentials
+- `ADP_CLIENT_SECRET`: Client credentials secret
+- `ADP_CERT_PEM`: mTLS certificate (PEM or base64)
+- `ADP_CERT_KEY`: mTLS private key (PEM or base64)
+
+**LDAP Integration**:
+
+- `LDAP_SERVER`: Active Directory server hostname
+- `LDAP_USER`: Bind distinguished name
+- `LDAP_PASSWORD`: Bind account password
+- `LDAP_SEARCH_BASE`: User search base DN
+- `LDAP_CREATE_BASE`: OU for new account creation
+- `LDAP_ALLOWED_WRITE_BASES`: Comma-separated OUs permitted for modifications
+
+**Email (Termed Report)** - All required, no defaults:
+
+- `TERMED_REPORT_SMTP_HOST`: SMTP server for email delivery
+- `TERMED_REPORT_FROM_ADDRESS`: From email address
+- `TERMED_REPORT_RECIPIENTS`: Comma-separated recipient emails
+
+### Configurable Defaults
+
+**Connection Pooling**:
+
+- `LDAP_POOL_MIN_SIZE`: Minimum pool connections (default: 2)
+- `LDAP_POOL_MAX_SIZE`: Maximum pool connections (default: 10)
+
+**Job Behavior**:
+
+- `SYNC_HIRE_LOOKBACK_DAYS`: Hire lookback window (default: 4)
+- `UPDATE_LOOKBACK_DAYS`: Update lookback window (default: 7)
+- `UPDATE_DRY_RUN`: Simulation mode (default: true - safe by default)
+- `UPDATE_ENABLED_FIELDS`: Fields to update (default: all managed attributes)
+- `PROVISION_MAX_ADD_RETRIES`: Collision retry attempts (default: 15)
 
 ## Architecture Decisions
 
+### ADR-001: LDAP Connection Pooling
+
+**Problem**: LDAP operations created fresh connections per operation, causing bind/unbind overhead.
+
+**Solution**: Implement a repo-owned reusable LDAP connection pool around `ldap3.Connection` with configurable 2-10 worker sizes.
+
+**Benefits**:
+
+- Reduces bind cycles via connection reuse
+- Scales with environment configuration
+- Fault-tolerant for transient failures
+
+### ADR-002: No Infrastructure Defaults in Code
+
+**Problem**: Hardcoded SMTP host, email addresses, and infrastructure details exposed company topology and personal data.
+
+**Solution**: Remove all defaults; require explicit environment configuration with fast-fail validation.
+
+**Benefits**:
+
+- Prevents accidental infrastructure disclosure
+- Catches configuration errors at startup (vs. runtime)
+- Improves security for open-source deployment
+
+### ADR-003: Sensitive Data Redaction in Logs
+
+**Problem**: Passwords and secrets could leak through logging, exceptions, or telemetry.
+
+**Solution**: Implement `SensitiveDataFilter` applied at root logger to redact `password`, `secret`, `LDAP_PASSWORD`, `client_secret` patterns.
+
+**Benefits**:
+
+- Centralized redaction prevents multiple implementations
+- Applied at framework level (covers all handlers)
+- Prevents accidental credential exposure in logs
+
+### ADR-004: LDAP Filter Escaping for Injection Prevention
+
+**Problem**: Employee IDs directly interpolated into LDAP filters without escaping, allowing injection attacks.
+
+**Solution**: Use `ldap3.utils.conv.escape_filter_chars()` for all filter construction.
+
+**Benefits**:
+
+- Battle-tested escaping from trusted library
+- Consistent with existing codebase patterns
+- Prevents all LDAP metacharacter injection
+
+## Observability & Monitoring
+
+### Structured Telemetry
+
+JSON-formatted events emitted to Application Insights with schema:
+
+```json
+{
+  "event": "provision_started | update_completed | error",
+  "run_id": "provision-abc123",
+  "context": "Provision | Update | Report",
+  "employees_processed": 42,
+  "employees_modified": 3
+}
+```
+
+### Log Filtering
+
+All logs automatically filtered to redact sensitive patterns:
+
+- `"password": "<REDACTED>"`
+- `"LDAP_PASSWORD": "<REDACTED>"`
+- `"client_secret": "<REDACTED>"`
+
+### Diagnostics Endpoints
+
+```bash
+GET /admin/diagnostics?view=summary
+    → Job execution summary, ADP/AD record counts
+
+GET /admin/diagnostics?view=worker&employeeId=EMP123
+    → Single worker snapshot (ADP vs AD comparison)
+
+GET /admin/diagnostics?view=recent-hires&limit=25
+    → Recent hires (configurable, max 100)
+
+GET /admin/diagnostics?view=department-diff
+    → AD vs ADP department alignment report
+```
+
+## Deployment & Operations
+
+### Pre-Deployment Checklist
+
+1. Configure all required environment variables (no defaults provided)
+2. Verify LDAP/AD permissions for target OU
+3. Test with `UPDATE_DRY_RUN=true` before enabling writes
+4. Monitor Application Insights for telemetry
+
+### Troubleshooting
+
+**LDAP Connection Timeout**:
+
+- Verify AD server connectivity and TLS port (usually 636)
+- Check `CA_BUNDLE_PATH` or system certificate store
+
+**ADP Token Failures**:
+
+- Verify certificate expiration and validity
+- Confirm OAuth2 endpoint accessibility
+
+**Missing Users**:
+
+- Check lookback windows match hire dates
+- Verify ADP employee status = "Active"
+
+### Monitoring
+
+- **Application Insights**: Query telemetry for trends
+- **Pool Statistics**: Check debug logs for `pool_size=` utilization
+- **Function Duration**: Monitor sync job execution time
+- **Email Delivery**: Verify termination reports arrive
+
+## Key Design Principles
+
 - The sync is stateless and polling-oriented. There is no application database, queue, or persisted cursor.
-- ADP is the source of truth for worker lifecycle state and upstream HR attributes consumed by this app. Active Directory is the managed projection target.
+- ADP is the source of truth for worker lifecycle state and upstream HR attributes. Active Directory is the managed projection target.
 - `employeeID` is the canonical cross-system identity key.
 - Azure-specific trigger and route concerns stop at the decorated entrypoints. Workflow sequencing lives in service orchestrators, and transport logic lives in focused ADP and LDAP packages.
-- Update behavior is safe by default because `UPDATE_DRY_RUN=true` unless an environment explicitly disables it.
-- Diagnostics is intentionally read-only and bounded to explicit query modes rather than acting as a general-purpose worker or directory browser.
-- Some historical names still include `azuread`, but the runtime target described in this repository is on-prem Active Directory over LDAPS rather than Entra ID.
+- Update behavior is safe by default (`UPDATE_DRY_RUN=true`) unless explicitly disabled.
+- Diagnostics is intentionally read-only and bounded to explicit query modes.
+- No infrastructure details (hostnames, email addresses) hardcoded in source code.
 
 ## Quick Reference
 
@@ -230,6 +453,7 @@ The configuration model is fully environment-driven.
 - [`app/config.py`](../app/config.py) parses booleans, integers, CSV lists, and required env sets
 - [`app/models.py`](../app/models.py) defines typed settings objects
 - [`local.settings.example.json`](../local.settings.example.json) provides the committed local template
+- The update job can optionally narrow its managed write scope with `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS`. When those settings are unset, the current full bounded update field set remains active, and `UPDATE_DRY_RUN=true` still keeps the job non-writing by default.
 
 Secret-backed file handling is centralized in [`app/security.py`](../app/security.py):
 

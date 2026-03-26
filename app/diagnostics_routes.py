@@ -11,6 +11,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ldap3 import SUBTREE
+from ldap3.core.exceptions import LDAPException
 
 from .adp import (
     get_adp_employees,
@@ -20,6 +21,7 @@ from .adp import (
 )
 from .azure_compat import func
 from .config import env_truthy, get_ldap_settings, validate_ldap_settings
+from .constants import DIAGNOSTICS_DEFAULT_RECENT_HIRES_LIMIT, DIAGNOSTICS_MAX_RECENT_HIRES_LIMIT
 from .ldap import (
     create_ldap_server,
     log_ldap_target_details,
@@ -29,8 +31,10 @@ from .ldap import (
 from .services.defaults import DefaultWorkerProvider
 from .services.diagnostics_service import DiagnosticsDataService
 
-DEFAULT_RECENT_HIRES_LIMIT = 25
-MAX_RECENT_HIRES_LIMIT = 100
+# Re-export constants for backward compatibility
+DEFAULT_RECENT_HIRES_LIMIT = DIAGNOSTICS_DEFAULT_RECENT_HIRES_LIMIT
+MAX_RECENT_HIRES_LIMIT = DIAGNOSTICS_MAX_RECENT_HIRES_LIMIT
+
 SUPPORTED_DIAGNOSTICS_VIEWS = {
     "summary",
     "department-diff",
@@ -112,7 +116,7 @@ def fetch_ad_data_task() -> Optional[dict[str, str]]:
     conn_factory = make_conn_factory(server, ldap_settings.user, ldap_settings.password, "Diagnostics")
     try:
         conn = conn_factory()
-    except Exception as exc:
+    except LDAPException as exc:
         logging.error(f"Failed to connect to LDAP for diagnostics: {exc}")
         return None
 
@@ -130,7 +134,7 @@ def fetch_ad_data_task() -> Optional[dict[str, str]]:
                     paged_size=page_size,
                     paged_cookie=cookie,
                 )
-            except Exception as exc:
+            except LDAPException as exc:
                 logging.error(f"LDAP diagnostics search failed: {exc}")
                 return None
             for entry in conn.entries:

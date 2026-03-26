@@ -1,3 +1,5 @@
+import pytest
+
 from app.config import (
     env_truthy,
     get_provision_job_settings,
@@ -39,6 +41,35 @@ def test_update_job_defaults_and_invalid_lookback(monkeypatch):
     assert settings.lookback_days == 7
     assert settings.include_missing_last_updated is True
     assert settings.log_no_changes is True
+    assert settings.enabled_fields == ()
+    assert settings.enabled_groups == ()
+    assert settings.always_disable_terminated is True
+
+
+def test_update_job_parses_field_filters_and_termination_override(monkeypatch):
+    monkeypatch.setenv("UPDATE_ENABLED_FIELDS", " title, Department, displayname ")
+    monkeypatch.setenv("UPDATE_ENABLED_GROUPS", " manager, ADDRESS ")
+    monkeypatch.setenv("UPDATE_ALWAYS_DISABLE_TERMINATED", "false")
+
+    settings = get_update_job_settings()
+
+    assert settings.enabled_fields == ("title", "department", "displayName")
+    assert settings.enabled_groups == ("manager", "address")
+    assert settings.always_disable_terminated is False
+
+
+def test_update_job_rejects_unknown_enabled_field(monkeypatch):
+    monkeypatch.setenv("UPDATE_ENABLED_FIELDS", "title,notARealField")
+
+    with pytest.raises(ValueError, match="UPDATE_ENABLED_FIELDS contains unsupported values"):
+        get_update_job_settings()
+
+
+def test_update_job_rejects_unknown_enabled_group(monkeypatch):
+    monkeypatch.setenv("UPDATE_ENABLED_GROUPS", "department,notARealGroup")
+
+    with pytest.raises(ValueError, match="UPDATE_ENABLED_GROUPS contains unsupported values"):
+        get_update_job_settings()
 
 
 def test_provision_job_defaults(monkeypatch):
@@ -58,6 +89,22 @@ def test_termed_report_defaults(monkeypatch):
     monkeypatch.delenv("TERMED_REPORT_FROM_ADDRESS", raising=False)
     monkeypatch.delenv("TERMED_REPORT_RECIPIENTS", raising=False)
     monkeypatch.delenv("TERMED_REPORT_SUBJECT", raising=False)
+
+    with pytest.raises(RuntimeError, match="Missing required email configuration"):
+        get_termed_report_settings()
+
+
+def test_termed_report_settings_require_explicit_email_configuration(monkeypatch):
+    monkeypatch.setenv("TERMED_REPORT_LOOKBACK_DAYS", "30")
+    monkeypatch.setenv("TERMED_REPORT_SMTP_HOST", "10.209.10.25")
+    monkeypatch.setenv("TERMED_REPORT_SMTP_PORT", "25")
+    monkeypatch.setenv("TERMED_REPORT_FROM_ADDRESS", "90day@cfsbrands.com")
+    monkeypatch.setenv(
+        "TERMED_REPORT_RECIPIENTS",
+        "jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com",
+    )
+    monkeypatch.setenv("TERMED_REPORT_SUBJECT", "ADP Last 30 Day Termed Report")
+
     settings = get_termed_report_settings()
     assert settings.lookback_days == 30
     assert settings.smtp_host == "10.209.10.25"

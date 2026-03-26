@@ -145,6 +145,61 @@ Set values in Azure App Settings for deployed environments. For local developmen
 - `UPDATE_LOOKBACK_DAYS` (default `7`)
 - `UPDATE_INCLUDE_MISSING_LAST_UPDATED` (default `true`)
 - `UPDATE_LOG_NO_CHANGES` (default `false`)
+- `UPDATE_ENABLED_FIELDS` (optional comma-delimited LDAP attribute allowlist; when unset or empty, the current full managed update field set remains active)
+- `UPDATE_ENABLED_GROUPS` (optional comma-delimited field groups; when unset or empty, no group filter is applied)
+- `UPDATE_ALWAYS_DISABLE_TERMINATED` (default `true`; keeps `userAccountControl` disablement active for termed workers even when field filters are narrower)
+
+Supported `UPDATE_ENABLED_GROUPS` values:
+
+- `identity`
+- `department`
+- `manager`
+- `address`
+- `status`
+
+Supported `UPDATE_ENABLED_FIELDS` values:
+
+- `displayName`
+- `title`
+- `company`
+- `department`
+- `manager`
+- `l`
+- `postalCode`
+- `st`
+- `streetAddress`
+- `co`
+- `c`
+- `countryCode`
+- `userAccountControl`
+
+Safe template values in [`local.settings.example.json`](local.settings.example.json):
+
+```json
+"UPDATE_DRY_RUN": "true",
+"UPDATE_ENABLED_FIELDS": "",
+"UPDATE_ENABLED_GROUPS": "",
+"UPDATE_ALWAYS_DISABLE_TERMINATED": "true"
+```
+
+Behavior:
+
+- `UPDATE_ENABLED_FIELDS=""` keeps field filtering inactive
+- `UPDATE_ENABLED_GROUPS=""` keeps group filtering inactive
+- `UPDATE_ALWAYS_DISABLE_TERMINATED="true"` preserves the current termination-disable safeguard
+- with both allowlists empty, `scheduled_update_existing_users` still uses the current full managed update field set, but remains non-writing while `UPDATE_DRY_RUN=true`
+
+Examples:
+
+```json
+"UPDATE_ENABLED_FIELDS": "title,department",
+"UPDATE_ENABLED_GROUPS": ""
+```
+
+```json
+"UPDATE_ENABLED_FIELDS": "",
+"UPDATE_ENABLED_GROUPS": "manager,address"
+```
 
 ### Weekly Termed Report
 
@@ -172,6 +227,7 @@ func start --verbose
 Recommended local defaults:
 
 - keep `UPDATE_DRY_RUN=true` unless you are explicitly validating live update writes in a safe environment,
+- leave `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS` unset unless you intentionally want to narrow the update scope,
 - point all ADP and LDAP settings at non-production systems before running timers locally.
 
 ## Tests

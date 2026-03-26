@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
+from .constants import UPDATE_FIELD_GROUPS, UPDATE_MANAGED_ATTRIBUTES
 from .models import AdpSettings, LdapSettings, ProvisionJobSettings, TermedReportSettings, UpdateJobSettings
 from .security import get_ca_bundle
 
@@ -33,6 +34,26 @@ def parse_csv_env(name: str, default: str = "") -> tuple[str, ...]:
     """Parse a comma-delimited environment variable into trimmed values."""
     raw = os.getenv(name, default)
     return tuple(part.strip() for part in str(raw).split(",") if part.strip())
+
+
+def _parse_named_csv_env(name: str, valid_values: Iterable[str]) -> tuple[str, ...]:
+    """Parse and canonicalize a CSV environment variable against allowed names."""
+    canonical_by_normalized = {str(value).strip().lower(): str(value) for value in valid_values}
+    parsed_values = parse_csv_env(name)
+    canonical_values: list[str] = []
+    invalid_values: list[str] = []
+    for raw_value in parsed_values:
+        canonical_value = canonical_by_normalized.get(raw_value.strip().lower())
+        if canonical_value is None:
+            invalid_values.append(raw_value)
+            continue
+        if canonical_value not in canonical_values:
+            canonical_values.append(canonical_value)
+    if invalid_values:
+        valid_list = ", ".join(sorted(canonical_by_normalized.values()))
+        invalid_list = ", ".join(invalid_values)
+        raise ValueError(f"{name} contains unsupported values: {invalid_list}. Valid values: {valid_list}")
+    return tuple(canonical_values)
 
 
 def missing_env_vars(names: Iterable[str]) -> list[str]:
@@ -79,6 +100,20 @@ def get_ldap_settings(require_create_base: bool = False) -> LdapSettings:
     )
 
 
+def get_ldap_pool_settings() -> tuple[int, int]:
+    """Return LDAP connection pool configuration.
+    
+    Returns:
+        Tuple of (min_pool_size, max_pool_size)
+    """
+    min_size = parse_int_env("LDAP_POOL_MIN_SIZE", 2, minimum=1)
+    max_size = parse_int_env("LDAP_POOL_MAX_SIZE", 10, minimum=1)
+    # Ensure max >= min
+    if max_size < min_size:
+        max_size = min_size
+    return min_size, max_size
+
+
 def validate_ldap_settings(require_create_base: bool = False) -> list[str]:
     """Validate required LDAP environment keys."""
     names = ["LDAP_SERVER", "LDAP_USER", "LDAP_PASSWORD", "LDAP_SEARCH_BASE"]
@@ -94,6 +129,9 @@ def get_update_job_settings() -> UpdateJobSettings:
         lookback_days=parse_int_env("UPDATE_LOOKBACK_DAYS", 7),
         include_missing_last_updated=env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True),
         log_no_changes=env_truthy("UPDATE_LOG_NO_CHANGES", False),
+        enabled_fields=_parse_named_csv_env("UPDATE_ENABLED_FIELDS", UPDATE_MANAGED_ATTRIBUTES),
+        enabled_groups=_parse_named_csv_env("UPDATE_ENABLED_GROUPS", UPDATE_FIELD_GROUPS.keys()),
+        always_disable_terminated=env_truthy("UPDATE_ALWAYS_DISABLE_TERMINATED", True),
     )
 
 
@@ -107,15 +145,26 @@ def get_provision_job_settings() -> ProvisionJobSettings:
 
 
 def get_termed_report_settings() -> TermedReportSettings:
-    """Return typed weekly termed-report settings with production defaults."""
+    """Return typed weekly termed-report settings.
+    
+    Note: TERMED_REPORT_SMTP_HOST, TERMED_REPORT_FROM_ADDRESS, and TERMED_REPORT_RECIPIENTS
+    must be explicitly configured via environment variables. No defaults are provided
+    to prevent exposing infrastructure details and email addresses in source code.
+    """
+    # Validate required settings are provided
+    missing = missing_env_vars([
+        "TERMED_REPORT_SMTP_HOST",
+        "TERMED_REPORT_FROM_ADDRESS",
+        "TERMED_REPORT_RECIPIENTS",
+    ])
+    if missing:
+        raise RuntimeError(f"Missing required email configuration: {', '.join(missing)}")
+    
     return TermedReportSettings(
         lookback_days=parse_int_env("TERMED_REPORT_LOOKBACK_DAYS", 30, minimum=1),
-        smtp_host=os.getenv("TERMED_REPORT_SMTP_HOST", "10.209.10.25").strip(),
+        smtp_host=os.getenv("TERMED_REPORT_SMTP_HOST", "").strip(),
         smtp_port=parse_int_env("TERMED_REPORT_SMTP_PORT", 25, minimum=1),
-        from_address=os.getenv("TERMED_REPORT_FROM_ADDRESS", "90day@cfsbrands.com").strip(),
-        recipients=parse_csv_env(
-            "TERMED_REPORT_RECIPIENTS",
-            "jasonmcdaniel@cfsbrands.com, ashleytolbert@cfsbrands.com",
-        ),
+        from_address=os.getenv("TERMED_REPORT_FROM_ADDRESS", "").strip(),
+        recipients=parse_csv_env("TERMED_REPORT_RECIPIENTS", ""),
         subject=os.getenv("TERMED_REPORT_SUBJECT", "ADP Last 30 Day Termed Report").strip(),
     )

@@ -56,6 +56,9 @@ class UpdateJobSettings:
     lookback_days: int
     include_missing_last_updated: bool
     log_no_changes: bool
+    enabled_fields: tuple[str, ...] = ()
+    enabled_groups: tuple[str, ...] = ()
+    always_disable_terminated: bool = True
 
 
 @dataclass(frozen=True)

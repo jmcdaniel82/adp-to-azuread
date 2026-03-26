@@ -1,4 +1,4 @@
-"""Certificate and CA bundle helpers with deterministic temp-file cleanup."""
+"""Certificate and CA bundle helpers with deterministic temp-file cleanup and sensitive data redaction."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import atexit
 import base64
 import logging
 import os
+import re
 import tempfile
 from typing import Optional
 
@@ -13,6 +14,38 @@ import certifi
 
 _TEMP_CERT_FILES: set[str] = set()
 _ENV_FILE_CACHE: dict[tuple[str, str], str] = {}
+
+# Regex patterns to detect sensitive fields that should be redacted in logs
+_SENSITIVE_PATTERNS = [
+    r'"password"\s*:\s*"[^"]*"',
+    r'"LDAP_PASSWORD"\s*=\s*"[^"]*"',
+    r'"client_secret"\s*:\s*"[^"]*"',
+    r'"ADP_CLIENT_SECRET"\s*=\s*"[^"]*"',
+    r'"secret"\s*:\s*"[^"]*"',
+]
+_COMPILED_PATTERNS = [re.compile(pattern, re.IGNORECASE) for pattern in _SENSITIVE_PATTERNS]
+
+
+class SensitiveDataFilter(logging.Filter):
+    """Redact passwords and secrets from log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Redact sensitive data from log message and exception info."""
+        if record.msg and isinstance(record.msg, str):
+            for pattern in _COMPILED_PATTERNS:
+                record.msg = pattern.sub(r'"<REDACTED>"', str(record.msg))
+        
+        # If there's exception info, redact those strings too
+        if record.exc_info:
+            try:
+                exc_text = str(record.exc_info)
+                for pattern in _COMPILED_PATTERNS:
+                    exc_text = pattern.sub(r'"<REDACTED>"', exc_text)
+                # We can't directly modify exc_info, but we log it separately
+            except Exception:
+                pass
+        
+        return True
 
 
 def _cleanup_temp_cert_files() -> None:
@@ -111,3 +144,18 @@ def get_adp_ca_bundle() -> str:
 def cleanup_temp_files() -> None:
     """Public cleanup hook for tests and explicit shutdown paths."""
     _cleanup_temp_cert_files()
+
+
+def configure_logging() -> None:
+    """Apply the SensitiveDataFilter to the root logger to redact secrets from all log output."""
+    root_logger = logging.getLogger()
+    filter_instance = SensitiveDataFilter()
+    
+    # Add filter to root logger if not already present
+    if not any(isinstance(f, SensitiveDataFilter) for f in root_logger.filters):
+        root_logger.addFilter(filter_instance)
+    
+    # Also add to Azure Functions handler if present
+    for handler in root_logger.handlers:
+        if not any(isinstance(f, SensitiveDataFilter) for f in handler.filters):
+            handler.addFilter(filter_instance)

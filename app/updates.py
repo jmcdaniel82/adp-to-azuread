@@ -14,7 +14,7 @@ from .adp import (
     is_terminated_employee,
     log_potential_duplicate_profiles,
 )
-from .config import get_ldap_settings, get_update_job_settings, validate_ldap_settings
+from .config import get_ldap_pool_settings, get_ldap_settings, get_update_job_settings, validate_ldap_settings
 from .ldap import (
     apply_ldap_modifications,
     build_update_attributes,
@@ -24,7 +24,7 @@ from .ldap import (
     get_department_by_dn,
     is_bind_lost_result,
     log_ldap_target_details,
-    make_conn_factory,
+    make_pooled_conn_factory,
     safe_unbind,
 )
 from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider, build_telemetry_sink
@@ -92,6 +92,19 @@ def build_worker_provider() -> DefaultWorkerProvider:
         get_workers=get_adp_employees,
         dedupe_workers=dedupe_workers_by_employee_id,
         log_duplicate_profiles=log_potential_duplicate_profiles,
+    )
+
+
+def make_conn_factory(server, user, password, context_label):
+    """Compatibility seam for tests and callers that build update LDAP connections."""
+    min_size, max_size = get_ldap_pool_settings()
+    return make_pooled_conn_factory(
+        server,
+        user,
+        password,
+        context_label,
+        min_pool_size=min_size,
+        max_pool_size=max_size,
     )
 
 

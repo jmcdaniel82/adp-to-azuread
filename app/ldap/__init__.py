@@ -8,6 +8,7 @@ from .connection import (
     is_bind_lost_result,
     log_ldap_target_details,
     make_conn_factory,
+    make_pooled_conn_factory,
     safe_unbind,
 )
 from .directory import (
@@ -46,6 +47,7 @@ __all__ = [
     'log_cn_conflict_inventory',
     'log_ldap_target_details',
     'make_conn_factory',
+    'make_pooled_conn_factory',
     'normalize_department_for_compare',
     'plan_update_attributes',
     'safe_unbind',

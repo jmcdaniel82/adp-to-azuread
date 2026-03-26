@@ -7,8 +7,12 @@ import os
 from .azure_compat import func
 from .diagnostics_routes import diagnostics_handler
 from .provisioning import run_scheduled_provision_new_hires
+from .security import configure_logging
 from .termination_report import run_scheduled_last_30_day_termed_report
 from .updates import run_scheduled_update_existing_users
+
+# Configure logging with sensitive data redaction
+configure_logging()
 
 app = func.FunctionApp()
 WEEKLY_TERMED_REPORT_SCHEDULE = os.getenv("TERMED_REPORT_SCHEDULE", "0 0 14 * * 1")
@@ -33,7 +37,7 @@ def scheduled_last_30_day_termed_report(mytimer: func.TimerRequest):
 
 
 @app.function_name(name="diagnostics")
-@app.route(route="diagnostics", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="diagnostics", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
 def diagnostics(req: func.HttpRequest) -> func.HttpResponse:
     """Expose diagnostics views for summary, diff, worker, and recent-hire lookups."""
     return diagnostics_handler(req)

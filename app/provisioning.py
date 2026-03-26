@@ -9,7 +9,12 @@ from .adp import (
     get_adp_token,
     log_potential_duplicate_profiles,
 )
-from .config import get_ldap_settings, get_provision_job_settings, validate_ldap_settings
+from .config import (
+    get_ldap_pool_settings,
+    get_ldap_settings,
+    get_provision_job_settings,
+    validate_ldap_settings,
+)
 from .ldap import (
     apply_ldap_modifications,
     collect_identifier_conflicts,
@@ -17,7 +22,7 @@ from .ldap import (
     dn_exists_in_create_scope,
     get_department_by_dn,
     log_ldap_target_details,
-    make_conn_factory,
+    make_pooled_conn_factory,
     safe_unbind,
 )
 from .services.defaults import DefaultDirectoryGateway, DefaultWorkerProvider, build_telemetry_sink
@@ -43,6 +48,27 @@ def build_worker_provider() -> DefaultWorkerProvider:
     )
 
 
+def build_ldap_conn_factory():
+    """Build LDAP connection factory with pooling configuration.
+    
+    Returns a factory function that creates pooled LDAP connections.
+    Pool size is configurable via LDAP_POOL_MIN_SIZE and LDAP_POOL_MAX_SIZE env vars.
+    """
+    min_size, max_size = get_ldap_pool_settings()
+    
+    def wrapper(server, user, password, context_label):
+        return make_pooled_conn_factory(
+            server,
+            user,
+            password,
+            context_label,
+            min_pool_size=min_size,
+            max_pool_size=max_size,
+        )
+    
+    return wrapper
+
+
 def build_directory_gateway() -> DefaultDirectoryGateway:
     """Build the default LDAP-backed directory gateway for provisioning."""
     return DefaultDirectoryGateway(
@@ -50,7 +76,7 @@ def build_directory_gateway() -> DefaultDirectoryGateway:
         get_settings=get_ldap_settings,
         log_target_details=log_ldap_target_details,
         create_server=create_ldap_server,
-        make_conn_factory=make_conn_factory,
+        make_conn_factory=build_ldap_conn_factory(),
         get_department_by_dn=get_department_by_dn,
         apply_changes=apply_ldap_modifications,
         safe_unbind=safe_unbind,
