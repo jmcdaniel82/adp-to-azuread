@@ -13,6 +13,12 @@ warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:tagMap is deprecated\\. Please use TAG_MAP instead\\.:DeprecationWarning:pyasn1\\.codec\\.ber\\.encoder",
+    "ignore:typeMap is deprecated\\. Please use TYPE_MAP instead\\.:DeprecationWarning:pyasn1\\.codec\\.ber\\.encoder",
+]
+
 [[tool.mypy.overrides]]
 module = ["ldap3", "ldap3.*"]
 ignore_missing_imports = true
