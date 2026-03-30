@@ -156,7 +156,6 @@ def build_identifier_seeds(
     if not base_alias:
         base_alias = base_sam_raw
 
-    employee_cn_token = sanitize_string_for_sam(profile.emp_id) or profile.emp_id.strip()
     raw_upn_suffix = upn_suffix
     if raw_upn_suffix is None:
         raw_upn_suffix = os.getenv("UPN_SUFFIX") or "cfsbrands.com"
@@ -164,7 +163,7 @@ def build_identifier_seeds(
         base_sam_raw=base_sam_raw,
         base_alias=base_alias,
         upn_suffix=raw_upn_suffix.strip().lstrip("@"),
-        cn_root=f"{profile.full_name} {employee_cn_token}".strip(),
+        cn_root=profile.full_name.strip(),
     )
 
 

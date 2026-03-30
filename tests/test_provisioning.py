@@ -87,7 +87,7 @@ def _make_emp(employee_id="EMP12345", first="Jane", last="Doe"):
     }
 
 
-def test_provision_cn_is_deterministic_with_employee_id():
+def test_provision_cn_uses_display_name_without_employee_id():
     conn = DummyConn()
     emp = _make_emp(employee_id="6RJ7AAWFA", first="Tommy", last="Smith")
     provision_user_in_ad(
@@ -98,7 +98,31 @@ def test_provision_cn_is_deterministic_with_employee_id():
         max_retry_attempts=5,
         cn_collision_threshold=2,
     )
-    assert conn.add_called.startswith("CN=Tommy Smith 6RJ7AAWFA,")
+    assert conn.add_called.startswith("CN=Tommy Smith,")
+
+
+def test_visible_cn_conflict_retries_with_numeric_suffix(monkeypatch):
+    conn = DummyConnRetryOnce()
+    emp = _make_emp(employee_id="EMPCLASHCN", first="Jane", last="Doe")
+    monkeypatch.setattr(provisioning, "dn_exists_in_create_scope", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        provisioning,
+        "collect_identifier_conflicts",
+        lambda *args, **kwargs: {"sam": [], "upn": [], "mail": []},
+    )
+
+    provision_user_in_ad(
+        emp,
+        conn,
+        "DC=example,DC=com",
+        "OU=Users,DC=example,DC=com",
+        max_retry_attempts=5,
+        cn_collision_threshold=2,
+    )
+
+    assert conn.add_calls == 2
+    assert conn.add_attempts[0][0].startswith("CN=Jane Doe,")
+    assert conn.add_attempts[1][0].startswith("CN=Jane Doe 1,")
 
 
 def test_result68_without_visible_conflicts_fails_fast_and_counts_failure():
