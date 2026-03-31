@@ -113,6 +113,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 - Diagnostics routing now relies on App Service / Entra authentication at the platform boundary, with the Function route itself configured as anonymous and the app enforcing `X-MS-CLIENT-PRINCIPAL` presence when deployed auth is enabled.
 - Provisioning timer startup behavior was tightened by disabling cold-start execution (`run_on_startup=False`).
 - Fatal timer-path failures now raise exceptions instead of logging and returning success-like completions.
+- `scheduled_update_existing_users` now defaults to live manager updates with terminated-user disablement preserved, while broader update scope remains opt-in through explicit field/group settings.
 - `mypy app` is now part of a passing local/CI contract after the Azure compatibility and service refactor cleanup.
 
 ### Operational Improvements - Unreleased
@@ -146,7 +147,7 @@ Historical `0.0.x` entries for 2025 were backfilled from repository commit histo
 ### Planned - Unreleased
 
 - Complete and harden `scheduled_update_existing_users` for full production synchronization.
-- Finalize operational guardrails and runbook for update-mode rollout (`UPDATE_DRY_RUN=false`).
+- Finalize operational guardrails and runbook for any broader update-mode rollout beyond the default manager-plus-termination scope.
 
 ## [0.2.0] - In Progress
 

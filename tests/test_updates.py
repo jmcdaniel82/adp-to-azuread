@@ -356,6 +356,66 @@ def test_scheduled_update_filters_desired_attributes_to_enabled_fields(monkeypat
     assert captured_desired == [{"title": "New Title"}]
 
 
+def test_scheduled_update_defaults_to_manager_only_scope(monkeypatch, tmp_path):
+    conn = _DummyConn(
+        [_DummyEntry({"distinguishedName": "CN=User,DC=x", "department": "Finance", "manager": ""})]
+    )
+    ldap_settings = LdapSettings(
+        server="ldap.example.com",
+        user="EXAMPLE\\svc",
+        password="pw",
+        search_base="DC=example,DC=com",
+        create_base=None,
+        ca_bundle_path=str(tmp_path / "ca.pem"),
+    )
+    (tmp_path / "ca.pem").write_text("dummy", encoding="utf-8")
+    captured_desired = []
+
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=False,
+            lookback_days=0,
+            include_missing_last_updated=True,
+            log_no_changes=False,
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")
+    monkeypatch.setattr(
+        "app.updates.get_adp_employees",
+        lambda token: [
+            {
+                "workerID": {"idValue": "EMP1"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            }
+        ],
+    )
+    monkeypatch.setattr("app.updates.validate_ldap_settings", lambda require_create_base=False: [])
+    monkeypatch.setattr("app.updates.get_ldap_settings", lambda require_create_base=False: ldap_settings)
+    monkeypatch.setattr("app.updates.create_ldap_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr("app.updates.make_conn_factory", lambda *args, **kwargs: lambda: conn)
+    monkeypatch.setattr("app.updates.is_terminated_employee", lambda emp: False)
+    monkeypatch.setattr(
+        "app.updates.build_update_attributes",
+        lambda *args, **kwargs: {
+            "title": "New Title",
+            "department": "Sales",
+            "manager": "CN=Manager,DC=example,DC=com",
+        },
+    )
+    monkeypatch.setattr(
+        "app.updates.diff_update_attributes",
+        lambda entry, desired, context="": captured_desired.append(desired) or {},
+    )
+    monkeypatch.setattr("app.updates.entry_attr_value", lambda entry, attr: "CN=User,DC=x")
+    monkeypatch.setattr("app.updates.safe_unbind", lambda conn, context: None)
+
+    run_scheduled_update_existing_users(None)
+
+    assert captured_desired == [{"manager": "CN=Manager,DC=example,DC=com"}]
+
+
 def test_scheduled_update_still_disables_terminated_users_when_override_enabled(monkeypatch, tmp_path):
     conn = _DummyConn(
         [_DummyEntry({"distinguishedName": "CN=User,DC=x", "department": "Finance", "manager": ""})]
@@ -380,6 +440,58 @@ def test_scheduled_update_still_disables_terminated_users_when_override_enabled(
             log_no_changes=False,
             enabled_fields=("title",),
             always_disable_terminated=True,
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")
+    monkeypatch.setattr(
+        "app.updates.get_adp_employees",
+        lambda token: [
+            {
+                "workerID": {"idValue": "EMP1"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
+                "workerDates": {"hireDate": "2026-03-01", "terminationDate": "2026-03-05T00:00:00Z"},
+            }
+        ],
+    )
+    monkeypatch.setattr("app.updates.validate_ldap_settings", lambda require_create_base=False: [])
+    monkeypatch.setattr("app.updates.get_ldap_settings", lambda require_create_base=False: ldap_settings)
+    monkeypatch.setattr("app.updates.create_ldap_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr("app.updates.make_conn_factory", lambda *args, **kwargs: lambda: conn)
+    monkeypatch.setattr("app.updates.is_terminated_employee", lambda emp: True)
+    monkeypatch.setattr(
+        "app.updates.diff_update_attributes",
+        lambda entry, desired, context="": captured_desired.append(desired) or {},
+    )
+    monkeypatch.setattr("app.updates.entry_attr_value", lambda entry, attr: "CN=User,DC=x")
+    monkeypatch.setattr("app.updates.safe_unbind", lambda conn, context: None)
+
+    run_scheduled_update_existing_users(None)
+
+    assert captured_desired == [{"userAccountControl": 514}]
+
+
+def test_scheduled_update_default_manager_scope_still_disables_terminated_users(monkeypatch, tmp_path):
+    conn = _DummyConn(
+        [_DummyEntry({"distinguishedName": "CN=User,DC=x", "department": "Finance", "manager": ""})]
+    )
+    ldap_settings = LdapSettings(
+        server="ldap.example.com",
+        user="EXAMPLE\\svc",
+        password="pw",
+        search_base="DC=example,DC=com",
+        create_base=None,
+        ca_bundle_path=str(tmp_path / "ca.pem"),
+    )
+    (tmp_path / "ca.pem").write_text("dummy", encoding="utf-8")
+    captured_desired = []
+
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=False,
+            lookback_days=0,
+            include_missing_last_updated=True,
+            log_no_changes=False,
         ),
     )
     monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")

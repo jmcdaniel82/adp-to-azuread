@@ -1,4 +1,4 @@
-"""Existing-user update orchestration (dry-run default)."""
+"""Existing-user update orchestration."""
 
 from __future__ import annotations
 

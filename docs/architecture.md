@@ -135,8 +135,10 @@ Current schedules:
 
 - `SYNC_HIRE_LOOKBACK_DAYS`: Hire lookback window (default: 4)
 - `UPDATE_LOOKBACK_DAYS`: Update lookback window (default: 7)
-- `UPDATE_DRY_RUN`: Simulation mode (default: true - safe by default)
-- `UPDATE_ENABLED_FIELDS`: Fields to update (default: all managed attributes)
+- `UPDATE_DRY_RUN`: Simulation mode toggle (default: false for scoped live manager sync)
+- `UPDATE_ENABLED_FIELDS`: Fields to update (default: manager-only scoped live behavior unless expanded)
+- `UPDATE_ENABLED_GROUPS`: Field groups to update (default: `manager`)
+- `UPDATE_ALWAYS_DISABLE_TERMINATED`: Preserve disablement writes for termed users even when filters are narrower (default: true)
 - `PROVISION_MAX_ADD_RETRIES`: Collision retry attempts (default: 15)
 
 ## Architecture Decisions
@@ -235,7 +237,7 @@ GET /admin/diagnostics?view=department-diff
 
 1. Configure all required environment variables (no defaults provided)
 2. Verify LDAP/AD permissions for target OU
-3. Test with `UPDATE_DRY_RUN=true` before enabling writes
+3. Confirm the intended update mode before deploy: default scoped live manager sync plus terminated-user disablement, or `UPDATE_DRY_RUN=true` when rehearsing without writes
 4. Monitor Application Insights for telemetry
 
 ### Troubleshooting
@@ -268,7 +270,7 @@ GET /admin/diagnostics?view=department-diff
 - ADP is the source of truth for worker lifecycle state and upstream HR attributes. Active Directory is the managed projection target.
 - `employeeID` is the canonical cross-system identity key.
 - Azure-specific trigger and route concerns stop at the decorated entrypoints. Workflow sequencing lives in service orchestrators, and transport logic lives in focused ADP and LDAP packages.
-- Update behavior is safe by default (`UPDATE_DRY_RUN=true`) unless explicitly disabled.
+- Update behavior defaults to scoped live manager sync, while broader attribute write scope remains opt-in through `UPDATE_ENABLED_FIELDS` or `UPDATE_ENABLED_GROUPS`.
 - Diagnostics is intentionally read-only and bounded to explicit query modes.
 - No infrastructure details (hostnames, email addresses) hardcoded in source code.
 
@@ -277,7 +279,7 @@ GET /admin/diagnostics?view=department-diff
 | Entrypoint | Trigger | Default schedule or auth | Reads from | Writes to | Primary output |
 | --- | --- | --- | --- | --- | --- |
 | `scheduled_provision_new_hires` | Timer | every 15 minutes | ADP, LDAP | LDAP | new AD users, manager links, enabled accounts |
-| `scheduled_update_existing_users` | Timer | hourly, `UPDATE_DRY_RUN=true` by default | ADP, LDAP | LDAP when dry run is disabled | logged attribute diffs or applied attribute changes |
+| `scheduled_update_existing_users` | Timer | hourly, live manager sync by default | ADP, LDAP | LDAP | applied manager changes and termed-user disables, or logged diffs when `UPDATE_DRY_RUN=true` |
 | `scheduled_last_30_day_termed_report` | Timer | `TERMED_REPORT_SCHEDULE`, default `0 0 14 * * 1` | ADP | SMTP | emailed CSV report |
 | `GET /api/diagnostics` | HTTP GET | Entra App Service auth + deployed main-site IP allowlist | ADP, optional LDAP depending on `view` | none | bounded JSON diagnostics payload |
 
@@ -404,7 +406,7 @@ Summary:
 
 - fetch and dedupe ADP workers, then select update candidates from the configured lookback window
 - look up AD users by `employeeID`, derive desired attributes through the LDAP planner and department resolver, and diff against current state
-- log dry-run changes by default or apply bounded LDAP modifications when dry run is disabled
+- apply bounded LDAP modifications in scoped live mode by default, or log the same changes when `UPDATE_DRY_RUN=true`
 - preserve create-time-only routing identifiers by filtering them out of update changes
 
 ### Termed Report Flow
@@ -453,7 +455,7 @@ The configuration model is fully environment-driven.
 - [`app/config.py`](../app/config.py) parses booleans, integers, CSV lists, and required env sets
 - [`app/models.py`](../app/models.py) defines typed settings objects
 - [`local.settings.example.json`](../local.settings.example.json) provides the committed local template
-- The update job can optionally narrow its managed write scope with `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS`. When those settings are unset, the current full bounded update field set remains active, and `UPDATE_DRY_RUN=true` still keeps the job non-writing by default.
+- The update job can scope or broaden its managed write set with `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS`. When those settings are unset, the job defaults to the `manager` group, and `UPDATE_ALWAYS_DISABLE_TERMINATED=true` still preserves disablement writes for termed users.
 
 Secret-backed file handling is centralized in [`app/security.py`](../app/security.py):
 
@@ -545,7 +547,7 @@ Manual publish remains possible via Azure Functions Core Tools, with publish hyg
 - SMTP failure:
   treat the weekly report as unsent until a later successful run or a manual resend; the repository has no built-in resend queue.
 - Dry-run versus live update verification:
-  confirm `UPDATE_DRY_RUN` in the environment and use update logs plus diagnostics views to verify whether a run only planned changes or actually applied them.
+  confirm `UPDATE_DRY_RUN`, `UPDATE_ENABLED_GROUPS`, and `UPDATE_ALWAYS_DISABLE_TERMINATED` in the environment and use update logs plus diagnostics views to verify whether a run only planned changes or actually applied them.
 
 ## Time Semantics
 
@@ -569,7 +571,7 @@ Manual publish remains possible via Azure Functions Core Tools, with publish hyg
 - The old public module names remain in place as compatibility facades for external imports and test seams, but internal application code now imports the split packages directly.
 - The previous single-file hotspots are now split across focused helper modules. The densest remaining logic is mostly in [`app/provisioning_create.py`](../app/provisioning_create.py), [`app/adp/assignments.py`](../app/adp/assignments.py), and [`app/department/candidates.py`](../app/department/candidates.py), where the domain complexity still naturally lives.
 - The directory gateway now owns update-path employee lookup, department lookup, and change application. The remaining live LDAP connection exposure is concentrated in the create-user path used by provisioning operations.
-- The live integration layer now covers transport smoke plus a gated update-workflow dry run, but it is still intentionally not a full write-path end-to-end suite.
+- The live integration layer now covers transport smoke plus gated update-workflow dry-run and write-path checks, but it is still intentionally not a full end-to-end coverage net for every production attribute combination.
 - Diagnostics projections now live in their own package, which reduces route/service duplication. Some shared helper coupling remains because diagnostics and workflows still consume the same ADP and department-domain rules.
 
 ## Extension Points

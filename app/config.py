@@ -123,9 +123,9 @@ def validate_ldap_settings(require_create_base: bool = False) -> list[str]:
 
 
 def get_update_job_settings() -> UpdateJobSettings:
-    """Return typed scheduled-update settings with safe defaults."""
+    """Return typed scheduled-update settings with scoped live defaults."""
     return UpdateJobSettings(
-        dry_run=env_truthy("UPDATE_DRY_RUN", True),
+        dry_run=env_truthy("UPDATE_DRY_RUN", False),
         lookback_days=parse_int_env("UPDATE_LOOKBACK_DAYS", 7),
         include_missing_last_updated=env_truthy("UPDATE_INCLUDE_MISSING_LAST_UPDATED", True),
         log_no_changes=env_truthy("UPDATE_LOG_NO_CHANGES", False),

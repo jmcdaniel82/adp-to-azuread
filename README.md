@@ -7,7 +7,7 @@ This project syncs ADP Workforce Now worker data into on-prem Active Directory o
 The application has three timer jobs and one HTTP diagnostics route:
 
 - `scheduled_provision_new_hires` provisions new AD accounts for hires inside a lookback window.
-- `scheduled_update_existing_users` compares ADP data to existing AD users and updates attributes (dry-run by default).
+- `scheduled_update_existing_users` compares ADP data to existing AD users, applies live manager updates by default, and disables terminated users.
 - `scheduled_last_30_day_termed_report` emails a weekly ADP-only CSV of workers terminated in the last 30 days.
 - `GET /api/diagnostics` serves explicit diagnostics views behind Microsoft Entra authentication at the App Service layer.
   In deployed environments, the main site is additionally IP-allowlisted so diagnostics is not internet-wide:
@@ -82,7 +82,7 @@ For the full architecture walkthrough, top-level architecture maps, and runtime 
 The refactor intentionally preserves these rules:
 
 - `scheduled_provision_new_hires` remains functional.
-- `scheduled_update_existing_users` remains dry-run by default (`UPDATE_DRY_RUN=true`).
+- `scheduled_update_existing_users` now defaults to live manager updates with terminated-user disablement (`UPDATE_DRY_RUN=false` plus default manager scope).
 - Provisioning no longer runs on cold start; the timer uses its normal 15-minute cadence only.
 - Fatal timer-path failures raise exceptions so Azure Functions can treat the invocation as failed.
 - Update sync never modifies create-time-only email routing identifiers:
@@ -141,12 +141,12 @@ Set values in Azure App Settings for deployed environments. For local developmen
 
 ### Update Job
 
-- `UPDATE_DRY_RUN` (default `true`)
+- `UPDATE_DRY_RUN` (default `false`)
 - `UPDATE_LOOKBACK_DAYS` (default `7`)
 - `UPDATE_INCLUDE_MISSING_LAST_UPDATED` (default `true`)
 - `UPDATE_LOG_NO_CHANGES` (default `false`)
-- `UPDATE_ENABLED_FIELDS` (optional comma-delimited LDAP attribute allowlist; when unset or empty, the current full managed update field set remains active)
-- `UPDATE_ENABLED_GROUPS` (optional comma-delimited field groups; when unset or empty, no group filter is applied)
+- `UPDATE_ENABLED_FIELDS` (optional comma-delimited LDAP attribute allowlist; when unset or empty, the default scoped live behavior stays manager-only unless expanded by groups)
+- `UPDATE_ENABLED_GROUPS` (optional comma-delimited field groups; when unset or empty, `scheduled_update_existing_users` defaults to the `manager` group)
 - `UPDATE_ALWAYS_DISABLE_TERMINATED` (default `true`; keeps `userAccountControl` disablement active for termed workers even when field filters are narrower)
 
 Supported `UPDATE_ENABLED_GROUPS` values:
@@ -173,21 +173,21 @@ Supported `UPDATE_ENABLED_FIELDS` values:
 - `countryCode`
 - `userAccountControl`
 
-Safe template values in [`local.settings.example.json`](local.settings.example.json):
+Committed scoped-live template values in [`local.settings.example.json`](local.settings.example.json):
 
 ```json
-"UPDATE_DRY_RUN": "true",
+"UPDATE_DRY_RUN": "false",
 "UPDATE_ENABLED_FIELDS": "",
-"UPDATE_ENABLED_GROUPS": "",
+"UPDATE_ENABLED_GROUPS": "manager",
 "UPDATE_ALWAYS_DISABLE_TERMINATED": "true"
 ```
 
 Behavior:
 
-- `UPDATE_ENABLED_FIELDS=""` keeps field filtering inactive
-- `UPDATE_ENABLED_GROUPS=""` keeps group filtering inactive
+- `UPDATE_ENABLED_FIELDS=""` leaves the default group-based scope in place
+- `UPDATE_ENABLED_GROUPS="manager"` keeps scheduled updates scoped to manager writes
 - `UPDATE_ALWAYS_DISABLE_TERMINATED="true"` preserves the current termination-disable safeguard
-- with both allowlists empty, `scheduled_update_existing_users` still uses the current full managed update field set, but remains non-writing while `UPDATE_DRY_RUN=true`
+- with both allowlists empty, `scheduled_update_existing_users` still defaults to manager-only live updates; set `UPDATE_DRY_RUN=true` to rehearse without writes
 
 Examples:
 
@@ -226,8 +226,9 @@ func start --verbose
 
 Recommended local defaults:
 
-- keep `UPDATE_DRY_RUN=true` unless you are explicitly validating live update writes in a safe environment,
-- leave `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS` unset unless you intentionally want to narrow the update scope,
+- keep the committed scoped-live defaults when validating manager sync and terminated-user disablement,
+- set `UPDATE_DRY_RUN=true` if you want to rehearse the same scope without writes or before broadening beyond manager-only,
+- set explicit `UPDATE_ENABLED_FIELDS` and `UPDATE_ENABLED_GROUPS` when you intentionally want to broaden beyond manager-only scope,
 - point all ADP and LDAP settings at non-production systems before running timers locally.
 
 ## Tests
@@ -241,7 +242,7 @@ mypy app
 Default local verification covers:
 
 - Department Resolution V2 high-risk rules.
-- Update guardrails (denylist, dry-run, no-change path).
+- Update guardrails (denylist, scoped live defaults, dry-run toggle, no-change path).
 - Config/env parsing defaults and invalid fallback behavior.
 - ADP retry behavior for retryable and non-retryable outcomes.
 - Diagnostics route modes for summary, department diff, worker lookup, and recent hires.

@@ -32,12 +32,15 @@ def test_parse_csv_env_trims_and_drops_blank_values(monkeypatch):
 
 
 def test_update_job_defaults_and_invalid_lookback(monkeypatch):
-    monkeypatch.setenv("UPDATE_DRY_RUN", "true")
+    monkeypatch.delenv("UPDATE_DRY_RUN", raising=False)
+    monkeypatch.delenv("UPDATE_ENABLED_FIELDS", raising=False)
+    monkeypatch.delenv("UPDATE_ENABLED_GROUPS", raising=False)
+    monkeypatch.delenv("UPDATE_ALWAYS_DISABLE_TERMINATED", raising=False)
     monkeypatch.setenv("UPDATE_LOOKBACK_DAYS", "bad")
     monkeypatch.setenv("UPDATE_INCLUDE_MISSING_LAST_UPDATED", "yes")
     monkeypatch.setenv("UPDATE_LOG_NO_CHANGES", "1")
     settings = get_update_job_settings()
-    assert settings.dry_run is True
+    assert settings.dry_run is False
     assert settings.lookback_days == 7
     assert settings.include_missing_last_updated is True
     assert settings.log_no_changes is True

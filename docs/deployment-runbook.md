@@ -22,8 +22,10 @@ Production is always followed by the same indexed-function smoke check.
 2. Redeploy that commit by rerunning the workflow on the earlier commit or by
    checking it out locally and publishing it again.
 3. Confirm the production smoke check reports the expected indexed functions.
-4. Validate `scheduled_update_existing_users` is still in the intended dry-run
-   or live mode before declaring rollback complete.
+4. Validate `scheduled_update_existing_users` is still in the intended scoped live
+   mode before declaring rollback complete:
+   `UPDATE_DRY_RUN=false`, `UPDATE_ENABLED_GROUPS=manager`,
+   `UPDATE_ALWAYS_DISABLE_TERMINATED=true`.
 
 ## Smoke Failure Triage
 

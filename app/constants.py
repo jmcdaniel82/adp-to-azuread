@@ -88,6 +88,10 @@ UPDATE_FIELD_GROUPS = {
     "status": ("userAccountControl",),
 }
 
+# The scheduled update job defaults to live manager sync, with terminated-user
+# disablement preserved separately by UPDATE_ALWAYS_DISABLE_TERMINATED.
+DEFAULT_UPDATE_ENABLED_GROUPS = ("manager",)
+
 ADP_COUNTRY_NUMERIC_BY_ALPHA2 = {
     "US": 840,
     "MX": 484,

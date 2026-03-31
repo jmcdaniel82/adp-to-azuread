@@ -7,18 +7,22 @@ from typing import Callable
 
 from ..adp import extract_employee_id
 from ..config import get_update_job_settings
-from ..constants import AD_UPDATE_SEARCH_ATTRIBUTES, UPDATE_FIELD_GROUPS, UPDATE_MANAGED_ATTRIBUTES
+from ..constants import (
+    AD_UPDATE_SEARCH_ATTRIBUTES,
+    DEFAULT_UPDATE_ENABLED_GROUPS,
+    UPDATE_FIELD_GROUPS,
+    UPDATE_MANAGED_ATTRIBUTES,
+)
 from ..models import UpdateJobSettings
 from ..services.interfaces import DirectoryGateway, TelemetrySink, WorkerProvider
 from ..telemetry import new_run_id
 
 
-def _resolve_effective_enabled_fields(settings: UpdateJobSettings) -> tuple[str, ...] | None:
-    """Return the configured update-field allowlist, or None when unrestricted."""
-    if not settings.enabled_fields and not settings.enabled_groups:
-        return None
+def _resolve_effective_enabled_fields(settings: UpdateJobSettings) -> tuple[str, ...]:
+    """Return the effective update-field allowlist for the scheduled update job."""
     requested_fields = set(settings.enabled_fields)
-    for group_name in settings.enabled_groups:
+    requested_groups = settings.enabled_groups or DEFAULT_UPDATE_ENABLED_GROUPS
+    for group_name in requested_groups:
         requested_fields.update(UPDATE_FIELD_GROUPS[group_name])
     return tuple(attr for attr in UPDATE_MANAGED_ATTRIBUTES if attr in requested_fields)
 
@@ -72,13 +76,12 @@ class UpdateOrchestrator:
             f"[INFO] scheduled_update_existing_users triggered "
             f"(run_id={run_id}, dry_run={settings.dry_run}, lookback_days={settings.lookback_days})"
         )
-        if effective_enabled_fields is not None:
-            logging.info(
-                "[INFO] scheduled_update_existing_users field filter active "
-                f"(groups={settings.enabled_groups}, fields={settings.enabled_fields}, "
-                f"effective={effective_enabled_fields}, "
-                f"always_disable_terminated={settings.always_disable_terminated})"
-            )
+        logging.info(
+            "[INFO] scheduled_update_existing_users effective update scope "
+            f"(groups={settings.enabled_groups}, fields={settings.enabled_fields}, "
+            f"effective={effective_enabled_fields}, "
+            f"always_disable_terminated={settings.always_disable_terminated})"
+        )
 
         fatal_reason = ""
         try:
