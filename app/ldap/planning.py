@@ -167,6 +167,12 @@ def _parse_int_like(value) -> Optional[int]:
         return None
 
 
+def _is_account_disabled_value(value) -> bool:
+    """Return True when the AD account-disable bit is set."""
+    current_int = _parse_int_like(value)
+    return current_int is not None and bool(current_int & ACCOUNTDISABLE_FLAG)
+
+
 def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
     """Compute LDAP MODIFY_REPLACE ops for meaningful attribute changes."""
     changes = {}
@@ -183,6 +189,12 @@ def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
             current_str = (current or "").strip()
             desired_str = desired_val.strip()
             if attr == "manager":
+                if _is_account_disabled_value(entry_attr_value(entry, "userAccountControl")):
+                    logging.info(
+                        "Skipping manager update for disabled account %s",
+                        context or "<unknown>",
+                    )
+                    continue
                 if current_str.lower() == desired_str.lower():
                     continue
             elif attr == "department":
@@ -194,6 +206,12 @@ def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
                 current_int = _parse_int_like(current)
                 desired_int = _parse_int_like(desired_val)
                 if current_int is not None and desired_int is not None:
+                    if desired_int == 512 and (current_int & ACCOUNTDISABLE_FLAG):
+                        logging.info(
+                            "Skipping userAccountControl enable for disabled account %s",
+                            context or "<unknown>",
+                        )
+                        continue
                     if desired_int == 514 and (current_int & ACCOUNTDISABLE_FLAG):
                         continue
                     if current_int == desired_int:
@@ -205,6 +223,12 @@ def diff_update_attributes(entry, desired: dict, context: str = "") -> dict:
                 current_int = _parse_int_like(current)
                 desired_int = _parse_int_like(desired_val)
                 if current_int is not None and desired_int is not None:
+                    if desired_int == 512 and (current_int & ACCOUNTDISABLE_FLAG):
+                        logging.info(
+                            "Skipping userAccountControl enable for disabled account %s",
+                            context or "<unknown>",
+                        )
+                        continue
                     if desired_int == 514 and (current_int & ACCOUNTDISABLE_FLAG):
                         continue
                     if current_int == desired_int:

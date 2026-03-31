@@ -68,6 +68,27 @@ def test_user_account_control_disable_is_skipped_when_disabled_bit_already_set()
     assert changes == {}
 
 
+def test_user_account_control_enable_is_skipped_when_account_is_disabled():
+    entry = _DummyEntry({"userAccountControl": "66050"})
+    changes = diff_update_attributes(entry, {"userAccountControl": 512}, context="EMP-UAC-ENABLE-BIT")
+    assert changes == {}
+
+
+def test_manager_update_is_skipped_when_account_is_disabled():
+    entry = _DummyEntry(
+        {
+            "manager": "CN=Old Manager,DC=example,DC=com",
+            "userAccountControl": "66050",
+        }
+    )
+    changes = diff_update_attributes(
+        entry,
+        {"manager": "CN=New Manager,DC=example,DC=com"},
+        context="EMP-MGR-DISABLED",
+    )
+    assert changes == {}
+
+
 def test_select_update_candidates_matches_job_filters():
     now = datetime(2026, 3, 16, tzinfo=timezone.utc)
     settings = UpdateJobSettings(
@@ -416,6 +437,65 @@ def test_scheduled_update_defaults_to_manager_only_scope(monkeypatch, tmp_path):
     assert captured_desired == [{"manager": "CN=Manager,DC=example,DC=com"}]
 
 
+def test_scheduled_update_manager_scope_skips_disabled_ad_users(monkeypatch, tmp_path):
+    conn = _DummyConn(
+        [
+            _DummyEntry(
+                {
+                    "distinguishedName": "CN=User,DC=x",
+                    "department": "Finance",
+                    "manager": "CN=Old Manager,DC=example,DC=com",
+                    "userAccountControl": "514",
+                }
+            )
+        ]
+    )
+    ldap_settings = LdapSettings(
+        server="ldap.example.com",
+        user="EXAMPLE\\svc",
+        password="pw",
+        search_base="DC=example,DC=com",
+        create_base=None,
+        ca_bundle_path=str(tmp_path / "ca.pem"),
+    )
+    (tmp_path / "ca.pem").write_text("dummy", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=False,
+            lookback_days=0,
+            include_missing_last_updated=True,
+            log_no_changes=False,
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")
+    monkeypatch.setattr(
+        "app.updates.get_adp_employees",
+        lambda token: [
+            {
+                "workerID": {"idValue": "EMP1"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+            }
+        ],
+    )
+    monkeypatch.setattr("app.updates.validate_ldap_settings", lambda require_create_base=False: [])
+    monkeypatch.setattr("app.updates.get_ldap_settings", lambda require_create_base=False: ldap_settings)
+    monkeypatch.setattr("app.updates.create_ldap_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr("app.updates.make_conn_factory", lambda *args, **kwargs: lambda: conn)
+    monkeypatch.setattr("app.updates.is_terminated_employee", lambda emp: False)
+    monkeypatch.setattr(
+        "app.updates.build_update_attributes",
+        lambda *args, **kwargs: {"manager": "CN=New Manager,DC=example,DC=com"},
+    )
+    monkeypatch.setattr("app.updates.safe_unbind", lambda conn, context: None)
+
+    run_scheduled_update_existing_users(None)
+
+    assert conn.modify_calls == []
+
+
 def test_scheduled_update_still_disables_terminated_users_when_override_enabled(monkeypatch, tmp_path):
     conn = _DummyConn(
         [_DummyEntry({"distinguishedName": "CN=User,DC=x", "department": "Finance", "manager": ""})]
@@ -520,6 +600,67 @@ def test_scheduled_update_default_manager_scope_still_disables_terminated_users(
     run_scheduled_update_existing_users(None)
 
     assert captured_desired == [{"userAccountControl": 514}]
+
+
+def test_scheduled_update_status_scope_never_reenables_disabled_ad_users(monkeypatch, tmp_path):
+    conn = _DummyConn(
+        [
+            _DummyEntry(
+                {
+                    "distinguishedName": "CN=User,DC=x",
+                    "department": "Finance",
+                    "manager": "",
+                    "userAccountControl": "514",
+                }
+            )
+        ]
+    )
+    ldap_settings = LdapSettings(
+        server="ldap.example.com",
+        user="EXAMPLE\\svc",
+        password="pw",
+        search_base="DC=example,DC=com",
+        create_base=None,
+        ca_bundle_path=str(tmp_path / "ca.pem"),
+    )
+    (tmp_path / "ca.pem").write_text("dummy", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.updates.get_update_job_settings",
+        lambda: UpdateJobSettings(
+            dry_run=False,
+            lookback_days=0,
+            include_missing_last_updated=True,
+            log_no_changes=False,
+            enabled_groups=("status",),
+        ),
+    )
+    monkeypatch.setattr("app.updates.get_adp_token", lambda: "token")
+    monkeypatch.setattr(
+        "app.updates.get_adp_employees",
+        lambda token: [
+            {
+                "workerID": {"idValue": "EMP1"},
+                "workAssignments": [{"assignedWorkLocations": [{"address": {"countryCode": "US"}}]}],
+                "workerDates": {"hireDate": "2026-03-01"},
+                "workerStatus": {"statusCode": {"codeValue": "A"}},
+            }
+        ],
+    )
+    monkeypatch.setattr("app.updates.validate_ldap_settings", lambda require_create_base=False: [])
+    monkeypatch.setattr("app.updates.get_ldap_settings", lambda require_create_base=False: ldap_settings)
+    monkeypatch.setattr("app.updates.create_ldap_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr("app.updates.make_conn_factory", lambda *args, **kwargs: lambda: conn)
+    monkeypatch.setattr("app.updates.is_terminated_employee", lambda emp: False)
+    monkeypatch.setattr(
+        "app.updates.build_update_attributes",
+        lambda *args, **kwargs: {"userAccountControl": 512},
+    )
+    monkeypatch.setattr("app.updates.safe_unbind", lambda conn, context: None)
+
+    run_scheduled_update_existing_users(None)
+
+    assert conn.modify_calls == []
 
 
 def test_scheduled_update_can_skip_termination_disable_when_override_disabled(monkeypatch, tmp_path):
