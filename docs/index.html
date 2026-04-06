@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jason McDaniel | Portfolio</title>
+  <meta name="description" content="Jason McDaniel — Business Technology + AI. Enterprise automation, identity hygiene, and audit-first tooling." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <div class="brand">
+        <div class="name">Jason McDaniel</div>
+        <div class="tagline">Business Technology + Artificial Intelligence</div>
+      </div>
+      <nav class="nav">
+        <a href="#home">Home</a>
+        <a href="#portfolio">Portfolio</a>
+        <a href="#objectives">Objectives</a>
+        <a href="#sip">SIP</a>
+        <a href="#contact">About/Contact</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="home" class="container">
+    <section class="hero">
+      <h1>Enterprise automation that’s built to be trusted.</h1>
+      <p>
+        I build practical tools for Microsoft environments, focused on audit-first workflows, clear reporting,
+        and safe execution. My current SIP is an AI-assisted identity hygiene tool for AD DS, Entra ID, and Exchange.
+      </p>
+      <div class="cta-row">
+        <a class="btn" href="#sip">View SIP</a>
+        <a class="btn secondary" href="#portfolio">View Portfolio</a>
+      </div>
+      <div class="meta">
+        <span>Primary skills: PowerShell • Microsoft Graph • M365/Entra • Exchange • Reporting</span>
+      </div>
+    </section>
+
+    <section id="portfolio" class="section">
+      <h2>Portfolio / Boards Projects</h2>
+      <p class="sub">A few projects that show how I build, document, and ship.</p>
+
+      <div class="grid">
+        <article class="card">
+          <h3>ADP → Active Directory Sync (Azure Functions)</h3>
+          <p>Automated provisioning and updates from ADP Workforce Now into on-prem AD over LDAPS, with guardrails and diagnostics.</p>
+          <ul>
+            <li>Python Azure Functions + LDAP orchestration</li>
+            <li>Diagnostics routes + scoped live updates</li>
+            <li>Security hardening + deterministic cleanup</li>
+          </ul>
+          <a class="link" href="https://github.com/jmcdaniel82/adp-to-azuread" target="_blank" rel="noreferrer">Repo</a>
+        </article>
+
+        <article class="card">
+          <h3>SIP: AI-Assisted Microsoft Enterprise Cleanup</h3>
+          <p>Audit-first identity hygiene across AD DS, Entra ID, and Exchange with approval gating and rollback-ready logging.</p>
+          <ul>
+            <li>Audit Mode + HTML/CSV reporting</li>
+            <li>AI summaries (optional RAG) grounded in policy</li>
+            <li>Explicit approvals before remediation</li>
+          </ul>
+          <a class="link" href="#sip">Details</a>
+        </article>
+
+        <article class="card">
+          <h3>Rocket League Bot Work (Nexto Spyder)</h3>
+          <p>Experiments in reinforcement learning and faster bot learning pipelines for Rocket League.</p>
+          <ul>
+            <li>Training/testing workflow iteration</li>
+            <li>Performance benchmarking</li>
+            <li>Code + documentation hygiene</li>
+          </ul>
+          <a class="link" href="https://github.com/Spyderdreams/RLBotPythonHivemind" target="_blank" rel="noreferrer">Repo</a>
+        </article>
+      </div>
+    </section>
+
+    <section id="objectives" class="section">
+      <h2>Program Objectives</h2>
+      <p class="sub">I will align this site and my deliverables to my UAT program objectives. (Placeholders below until pasted from Canvas.)</p>
+      <ol class="objectives">
+        <li><strong>Objective 1:</strong> [Paste official objective]</li>
+        <li><strong>Objective 2:</strong> [Paste official objective]</li>
+        <li><strong>Objective 3:</strong> [Paste official objective]</li>
+        <li><strong>Objective 4:</strong> [Paste official objective]</li>
+        <li><strong>Objective 5:</strong> [Paste official objective]</li>
+        <li><strong>Objective 6:</strong> [Paste official objective]</li>
+      </ol>
+    </section>
+
+    <section id="sip" class="section">
+      <h2>Student Innovation Project (SIP)</h2>
+      <div class="sip-grid">
+        <div class="sip-copy">
+          <h3>AI-Assisted Microsoft Enterprise Cleanup</h3>
+          <p>
+            Most organizations accumulate identity “directory debt” over time: inactive users, orphaned mailboxes,
+            unused groups, and permissions that never got cleaned up. This increases attack surface and makes cleanup risky.
+          </p>
+          <p>
+            My SIP is an audit-first PowerShell module that generates clear HTML/CSV reports, adds policy-aware AI summaries
+            (optional RAG), and requires explicit approval before any remediation runs. Logs capture before/after state and
+            support rollback for supported actions.
+          </p>
+
+          <div class="pill-row">
+            <span class="pill">Audit Mode</span>
+            <span class="pill">Approval Gate</span>
+            <span class="pill">Safe Remediation</span>
+            <span class="pill">Logs + Rollback</span>
+          </div>
+
+          <div class="cta-row">
+            <a class="btn secondary" href="assets/SIP311_Assignment_5.2_Project_Proposal_Jason_McDaniel_FINAL.pdf">Project Proposal (PDF)</a>
+            <a class="btn secondary" href="assets/SIP311_Assignment_7.1_SIP_Pitch_Presentation_Jason_McDaniel.pptx">Pitch Deck (PPTX)</a>
+          </div>
+
+          <p class="small">Note: Upload your latest proposal/pitch files into <code>docs/assets/</code> to activate these links.</p>
+        </div>
+
+        <figure class="sip-figure">
+          <img src="assets/AI_Assisted_Enterprise_Cleanup_Diagram_SlideReady.png" alt="SIP system workflow diagram" />
+          <figcaption>
+            System workflow diagram (created by Jason McDaniel).
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="contact" class="section">
+      <h2>About / Contact</h2>
+      <div class="about">
+        <p>
+          I’m a systems engineer and service delivery leader focused on making Microsoft environments safer and easier to operate.
+          I like projects that reduce risk, remove busywork, and produce outputs that business stakeholders can understand.
+        </p>
+        <ul class="links">
+          <li><strong>GitHub:</strong> <a href="https://github.com/jmcdaniel82" target="_blank" rel="noreferrer">github.com/jmcdaniel82</a></li>
+          <li><strong>LinkedIn:</strong> <span class="muted">(add your profile URL)</span></li>
+          <li><strong>Email:</strong> <span class="muted">(add your email)</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div>© <span id="year"></span> Jason McDaniel</div>
+      <div class="muted">Built with GitHub Pages.</div>
+    </footer>
+  </main>
+
+  <script>
+    document.getElementById('year').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>
